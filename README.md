@@ -31,6 +31,17 @@ run_docker_image.sh yopo:latest yopo --workspace ~/code:/root/code
 run_docker_image.sh yopo:latest yopo --volume ~/datasets:/root/datasets
 ```
 
+`--workspace` and `--volume` are both Docker bind mounts, but the script treats
+them differently:
+
+- `--workspace` sets the primary work directory mount. It can be used once and
+  replaces the default `~:/root/host_home` mount. For example,
+  `--workspace ~/code:/root/code` mounts only `~/code` as `/root/code`.
+- `--volume` adds extra mounts. It can be used multiple times and does not
+  replace the workspace mount. For example,
+  `--volume ~/datasets:/root/datasets` keeps the default workspace mount and
+  also mounts `~/datasets` as `/root/datasets`.
+
 Preview the generated Docker command without running it:
 
 ```bash
