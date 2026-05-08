@@ -29,6 +29,8 @@ Options:
 Notes:
   - GPU, privileged mode, host networking, proxy port 7897, and ~:/root/host_home
     are enabled by default.
+  - When proxy is enabled, shell, apt, and git proxy settings inside the
+    container are updated through managed config instead of duplicated.
   - Bind mount sources and required WSL/GUI/GPU paths must exist before Docker runs.
   - In WSL, localhost/127.0.0.1 proxy values are rewritten to host.docker.internal.
   - On native Ubuntu, localhost/127.0.0.1 proxy values are kept.
@@ -170,6 +172,221 @@ container_running() {
   docker ps --format '{{.Names}}' | grep -Fxq "$1"
 }
 
+entrypoint_supports_bootstrap() {
+  [[ "$(basename "$ENTRYPOINT")" == "bash" ]]
+}
+
+container_proxy_setup_script() {
+  cat <<'EOF'
+set -Eeuo pipefail
+
+proxy_enabled="${RUN_DOCKER_PROXY_ENABLED:-0}"
+proxy="${RUN_DOCKER_PROXY:-}"
+no_proxy_value="${RUN_DOCKER_NO_PROXY:-localhost,127.0.0.1,::1}"
+start_marker="# >>> run_docker_image proxy >>>"
+end_marker="# <<< run_docker_image proxy <<<"
+proxy_vars='http_proxy|https_proxy|ftp_proxy|all_proxy|HTTP_PROXY|HTTPS_PROXY|FTP_PROXY|ALL_PROXY|no_proxy|NO_PROXY'
+
+update_shell_file() {
+  local file="$1"
+  local tmp_file=""
+
+  mkdir -p "$(dirname "$file")"
+  touch "$file"
+  tmp_file="$(mktemp)"
+
+  awk -v start="$start_marker" -v end="$end_marker" -v vars="$proxy_vars" '
+    $0 == start { skip = 1; next }
+    $0 == end { skip = 0; next }
+    skip { next }
+    $0 ~ "^[[:space:]]*(export[[:space:]]+)?(" vars ")=" { next }
+    { print }
+  ' "$file" > "$tmp_file"
+
+  if [[ "$proxy_enabled" == "1" ]]; then
+    cat >> "$tmp_file" <<PROXYEOF
+
+$start_marker
+export http_proxy="$proxy"
+export https_proxy="$proxy"
+export ftp_proxy="$proxy"
+export all_proxy="$proxy"
+export HTTP_PROXY="\$http_proxy"
+export HTTPS_PROXY="\$https_proxy"
+export FTP_PROXY="\$ftp_proxy"
+export ALL_PROXY="\$all_proxy"
+export no_proxy="$no_proxy_value"
+export NO_PROXY="\$no_proxy"
+$end_marker
+PROXYEOF
+  fi
+
+  cat "$tmp_file" > "$file"
+  rm -f "$tmp_file"
+}
+
+update_environment_file() {
+  local file="/etc/environment"
+  local tmp_file=""
+
+  touch "$file"
+  tmp_file="$(mktemp)"
+
+  awk -v start="$start_marker" -v end="$end_marker" -v vars="$proxy_vars" '
+    $0 == start { skip = 1; next }
+    $0 == end { skip = 0; next }
+    skip { next }
+    $0 ~ "^[[:space:]]*(" vars ")=" { next }
+    { print }
+  ' "$file" > "$tmp_file"
+
+  if [[ "$proxy_enabled" == "1" ]]; then
+    cat >> "$tmp_file" <<PROXYEOF
+
+$start_marker
+http_proxy="$proxy"
+https_proxy="$proxy"
+ftp_proxy="$proxy"
+all_proxy="$proxy"
+HTTP_PROXY="$proxy"
+HTTPS_PROXY="$proxy"
+FTP_PROXY="$proxy"
+ALL_PROXY="$proxy"
+no_proxy="$no_proxy_value"
+NO_PROXY="$no_proxy_value"
+$end_marker
+PROXYEOF
+  fi
+
+  cat "$tmp_file" > "$file"
+  rm -f "$tmp_file"
+}
+
+update_profile_script() {
+  local file="/etc/profile.d/run_docker_image_proxy.sh"
+
+  if [[ "$proxy_enabled" != "1" ]]; then
+    rm -f "$file"
+    return
+  fi
+
+  cat > "$file" <<PROXYEOF
+export http_proxy="$proxy"
+export https_proxy="$proxy"
+export ftp_proxy="$proxy"
+export all_proxy="$proxy"
+export HTTP_PROXY="\$http_proxy"
+export HTTPS_PROXY="\$https_proxy"
+export FTP_PROXY="\$ftp_proxy"
+export ALL_PROXY="\$all_proxy"
+export no_proxy="$no_proxy_value"
+export NO_PROXY="\$no_proxy"
+PROXYEOF
+}
+
+update_apt_proxy() {
+  local apt_dir="/etc/apt/apt.conf.d"
+  local apt_file="$apt_dir/95proxies"
+
+  [[ -d "$apt_dir" ]] || return 0
+
+  while IFS= read -r -d '' file; do
+    [[ "$file" == "$apt_file" ]] && continue
+    sed -i -E '/Acquire::(http|https|ftp)::Proxy/d' "$file" || true
+  done < <(find "$apt_dir" -maxdepth 1 -type f -print0)
+
+  if [[ "$proxy_enabled" != "1" ]]; then
+    rm -f "$apt_file"
+    return
+  fi
+
+  cat > "$apt_file" <<PROXYEOF
+Acquire::http::Proxy "$proxy";
+Acquire::https::Proxy "$proxy";
+Acquire::ftp::Proxy "$proxy";
+PROXYEOF
+}
+
+update_git_proxy() {
+  command -v git >/dev/null 2>&1 || return 0
+
+  if [[ "$proxy_enabled" == "1" ]]; then
+    git config --global --replace-all http.proxy "$proxy"
+    git config --global --replace-all https.proxy "$proxy"
+  else
+    git config --global --unset-all http.proxy 2>/dev/null || true
+    git config --global --unset-all https.proxy 2>/dev/null || true
+  fi
+}
+
+update_shell_file /root/.bashrc
+[[ -f /etc/bash.bashrc ]] && update_shell_file /etc/bash.bashrc
+update_environment_file
+update_profile_script
+update_apt_proxy
+update_git_proxy
+
+if [[ "$proxy_enabled" == "1" ]]; then
+  export http_proxy="$proxy"
+  export https_proxy="$proxy"
+  export ftp_proxy="$proxy"
+  export all_proxy="$proxy"
+  export HTTP_PROXY="$proxy"
+  export HTTPS_PROXY="$proxy"
+  export FTP_PROXY="$proxy"
+  export ALL_PROXY="$proxy"
+  export no_proxy="$no_proxy_value"
+  export NO_PROXY="$no_proxy_value"
+fi
+EOF
+}
+
+container_start_command() {
+  printf '%s\n' "$(container_proxy_setup_script)"
+  printf 'exec bash -i\n'
+}
+
+proxy_exec_env_args() {
+  local -n out_args="$1"
+
+  out_args+=(
+    -e "RUN_DOCKER_PROXY_ENABLED=$PROXY_ENABLED"
+    -e "RUN_DOCKER_PROXY=$PROXY_VALUE"
+    -e "RUN_DOCKER_NO_PROXY=$NO_PROXY_VALUE"
+  )
+
+  if [[ "$PROXY_ENABLED" -eq 1 ]]; then
+    out_args+=(
+      -e "http_proxy=$PROXY_VALUE"
+      -e "https_proxy=$PROXY_VALUE"
+      -e "ftp_proxy=$PROXY_VALUE"
+      -e "all_proxy=$PROXY_VALUE"
+      -e "HTTP_PROXY=$PROXY_VALUE"
+      -e "HTTPS_PROXY=$PROXY_VALUE"
+      -e "FTP_PROXY=$PROXY_VALUE"
+      -e "ALL_PROXY=$PROXY_VALUE"
+      -e "no_proxy=$NO_PROXY_VALUE"
+      -e "NO_PROXY=$NO_PROXY_VALUE"
+    )
+  fi
+}
+
+configure_existing_container_proxy() {
+  local container_name="$1"
+  local exec_args=(exec)
+
+  proxy_exec_env_args exec_args
+  docker "${exec_args[@]}" "$container_name" bash -lc "$(container_proxy_setup_script)"
+}
+
+open_container_shell() {
+  local container_name="$1"
+  local exec_args=(exec -it)
+
+  proxy_exec_env_args exec_args
+  exec docker "${exec_args[@]}" "$container_name" bash
+}
+
 IMAGE_NAME=""
 CTN_NAME=""
 WORKSPACE_MOUNT="${HOME}:/root/host_home"
@@ -177,6 +394,9 @@ SHM_SIZE="16g"
 NETWORK_MODE="host"
 ENTRYPOINT="bash"
 PROXY_MODE="7897"
+PROXY_ENABLED=0
+PROXY_VALUE=""
+NO_PROXY_VALUE="localhost,127.0.0.1,::1,host.docker.internal"
 USE_GPU=1
 USE_PRIVILEGED=1
 REPLACE=0
@@ -336,36 +556,31 @@ fi
 
 case "$PROXY_MODE" in
   none)
+    PROXY_ENABLED=0
+    PROXY_VALUE=""
     ;;
   auto)
     proxy_value="$(detect_proxy)"
     if [[ "$proxy_value" != "none" ]]; then
-      proxy_value="$(rewrite_proxy_for_container "$proxy_value")"
-      args+=(
-        -e "http_proxy=$proxy_value"
-        -e "https_proxy=$proxy_value"
-        -e "all_proxy=$proxy_value"
-        -e "HTTP_PROXY=$proxy_value"
-        -e "HTTPS_PROXY=$proxy_value"
-        -e "ALL_PROXY=$proxy_value"
-      )
+      PROXY_ENABLED=1
+      PROXY_VALUE="$(rewrite_proxy_for_container "$proxy_value")"
     fi
     ;;
   *)
     proxy_value="$(proxy_url_from_value "$PROXY_MODE")"
-    proxy_value="$(rewrite_proxy_for_container "$proxy_value")"
-    args+=(
-      -e "http_proxy=$proxy_value"
-      -e "https_proxy=$proxy_value"
-      -e "all_proxy=$proxy_value"
-      -e "HTTP_PROXY=$proxy_value"
-      -e "HTTPS_PROXY=$proxy_value"
-      -e "ALL_PROXY=$proxy_value"
-    )
+    PROXY_ENABLED=1
+    PROXY_VALUE="$(rewrite_proxy_for_container "$proxy_value")"
     ;;
 esac
 
+proxy_exec_env_args args
 args+=("$IMAGE_NAME")
+
+STARTUP_COMMAND=""
+if entrypoint_supports_bootstrap; then
+  STARTUP_COMMAND="$(container_start_command)"
+  args+=("-lc" "$STARTUP_COMMAND")
+fi
 
 echo "Environment: $(is_wsl && echo WSL || echo Ubuntu)"
 echo "Image: $IMAGE_NAME"
@@ -377,6 +592,10 @@ echo "Workspace: $workspace_label"
 if [[ "$DRY_RUN" -eq 1 ]]; then
   display_args=("${args[@]}")
   for i in "${!display_args[@]}"; do
+    if [[ -n "$STARTUP_COMMAND" && "${display_args[$i]}" == "$STARTUP_COMMAND" ]]; then
+      display_args[$i]="<configure-container-proxy-and-open-bash>"
+      continue
+    fi
     display_args[$i]="$(shorten_home_path "${display_args[$i]}")"
   done
 
@@ -397,10 +616,13 @@ if container_exists "$CTN_NAME"; then
     docker rm -f "$CTN_NAME" >/dev/null
   elif container_running "$CTN_NAME"; then
     echo "Container '$CTN_NAME' is already running; opening a shell in it."
-    exec docker exec -it "$CTN_NAME" bash
+    configure_existing_container_proxy "$CTN_NAME"
+    open_container_shell "$CTN_NAME"
   else
     echo "Container '$CTN_NAME' already exists; starting and attaching it."
-    exec docker start -ai "$CTN_NAME"
+    docker start "$CTN_NAME" >/dev/null
+    configure_existing_container_proxy "$CTN_NAME"
+    exec docker attach "$CTN_NAME"
   fi
 fi
 

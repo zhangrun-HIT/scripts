@@ -41,6 +41,19 @@ bindings and rewrites container proxy values from `127.0.0.1` to
 `host.docker.internal`. It uses proxy port `7897`, GPU support, host networking,
 privileged mode, and `~:/root/host_home` by default.
 
+When proxy is enabled, the container is configured before the interactive shell
+opens:
+
+- proxy environment variables are passed to Docker and written into managed
+  shell config blocks
+- apt proxy config is updated in `/etc/apt/apt.conf.d/95proxies`
+- git global `http.proxy` and `https.proxy` are updated when git is installed
+
+Existing proxy environment lines managed by the script are updated in place, and
+direct proxy exports in the touched shell files are removed before the managed
+block is written, so repeated runs do not create duplicate proxy exports. Use
+`--proxy none` to remove the script-managed proxy config.
+
 Bind mount sources and required WSL/GUI/GPU paths are checked before Docker
 runs. If a required path does not exist, the script exits with an error instead
 of starting a half-configured container.
