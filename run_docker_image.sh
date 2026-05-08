@@ -14,7 +14,7 @@ Examples:
 
 Options:
   -n, --name NAME             Container name. Overrides positional CONTAINER_NAME.
-  -w, --workspace SRC[:DST]   Bind mount workspace. Default: ~/code:/root/code.
+  -w, --workspace SRC[:DST]   Primary bind mount. Default: ~:/root/host_home.
   -v, --volume SRC:DST        Add an extra bind mount. Can be used multiple times.
       --shm-size SIZE         Docker shm size. Default: 16g.
       --network MODE          Docker network mode. Default: host.
@@ -27,7 +27,9 @@ Options:
   -h, --help                  Show this help.
 
 Notes:
-  - GPU, privileged mode, host networking, and ~/code:/root/code are enabled by default.
+  - GPU, privileged mode, host networking, proxy port 7897, and ~:/root/host_home
+    are enabled by default.
+  - Bind mount sources and required WSL/GUI/GPU paths must exist before Docker runs.
   - In WSL, localhost/127.0.0.1 proxy values are rewritten to host.docker.internal.
   - On native Ubuntu, localhost/127.0.0.1 proxy values are kept.
 EOF
@@ -49,6 +51,74 @@ sanitize_name() {
   value="${value//[:.]/-}"
   value="${value//[^a-zA-Z0-9_.-]/-}"
   printf '%s\n' "$value"
+}
+
+require_path() {
+  local path="$1"
+  local label="$2"
+
+  [[ -e "$path" ]] || die "$label does not exist: $path"
+}
+
+expand_host_path() {
+  local value="$1"
+
+  case "$value" in
+    "~")
+      printf '%s\n' "$HOME"
+      ;;
+    "~/"*)
+      printf '%s/%s\n' "$HOME" "${value#~/}"
+      ;;
+    *)
+      printf '%s\n' "$value"
+      ;;
+  esac
+}
+
+normalize_mount() {
+  local value="$1"
+  local default_dst="$2"
+  local src=""
+  local rest=""
+
+  if [[ "$value" == *:* ]]; then
+    src="${value%%:*}"
+    rest="${value#*:}"
+  else
+    src="$value"
+    rest="$default_dst"
+  fi
+
+  src="$(expand_host_path "$src")"
+  printf '%s:%s\n' "$src" "$rest"
+}
+
+mount_source() {
+  local value="$1"
+  printf '%s\n' "${value%%:*}"
+}
+
+shorten_home_path() {
+  local value="$1"
+
+  case "$value" in
+    "$HOME")
+      printf '~\n'
+      ;;
+    "$HOME"/*)
+      printf '~/%s\n' "${value#"$HOME"/}"
+      ;;
+    "$HOME":*)
+      printf '~:%s\n' "${value#"$HOME":}"
+      ;;
+    "$HOME"/*:*)
+      printf '~/%s\n' "${value#"$HOME"/}"
+      ;;
+    *)
+      printf '%s\n' "$value"
+      ;;
+  esac
 }
 
 proxy_url_from_value() {
@@ -102,7 +172,7 @@ container_running() {
 
 IMAGE_NAME=""
 CTN_NAME=""
-WORKSPACE_MOUNT="${HOME}/code:/root/code"
+WORKSPACE_MOUNT="${HOME}:/root/host_home"
 SHM_SIZE="16g"
 NETWORK_MODE="host"
 ENTRYPOINT="bash"
@@ -195,16 +265,21 @@ if [[ -z "$CTN_NAME" ]]; then
   CTN_NAME="$(sanitize_name "$IMAGE_NAME")"
 fi
 
-if [[ "$WORKSPACE_MOUNT" != *:* ]]; then
-  WORKSPACE_MOUNT="${WORKSPACE_MOUNT}:/root/code"
-fi
+command -v docker >/dev/null 2>&1 || die "docker command not found"
 
-if [[ "$WORKSPACE_MOUNT" == "~/"* ]]; then
-  WORKSPACE_MOUNT="${HOME}/${WORKSPACE_MOUNT#~/}"
-fi
-
+WORKSPACE_MOUNT="$(normalize_mount "$WORKSPACE_MOUNT" "/root/host_home")"
 HOST_WORKSPACE="${WORKSPACE_MOUNT%%:*}"
 [[ -d "$HOST_WORKSPACE" ]] || die "workspace path does not exist: $HOST_WORKSPACE"
+require_path /tmp/.X11-unix "X11 socket directory"
+
+NORMALIZED_EXTRA_VOLUMES=()
+for volume in "${EXTRA_VOLUMES[@]}"; do
+  [[ "$volume" == *:* ]] || die "--volume must be SRC:DST or SRC:DST:OPTIONS: $volume"
+  normalized_volume="$(normalize_mount "$volume" "")"
+  require_path "$(mount_source "$normalized_volume")" "volume source"
+  NORMALIZED_EXTRA_VOLUMES+=("$normalized_volume")
+done
+EXTRA_VOLUMES=("${NORMALIZED_EXTRA_VOLUMES[@]}")
 
 args=(
   run
@@ -238,9 +313,17 @@ if [[ "$USE_GPU" -eq 1 ]]; then
 fi
 
 if is_wsl; then
-  [[ -e /dev/dxg ]] && args+=(--device=/dev/dxg)
-  [[ -d /mnt/wslg ]] && args+=(-v /mnt/wslg:/mnt/wslg)
-  [[ -d /usr/lib/wsl ]] && args+=(-v /usr/lib/wsl:/usr/lib/wsl)
+  require_path /mnt/wslg "WSLg directory"
+  require_path /mnt/wslg/runtime-dir "WSLg runtime directory"
+  require_path /usr/lib/wsl "WSL library directory"
+
+  if [[ "$USE_GPU" -eq 1 ]]; then
+    require_path /dev/dxg "WSL GPU device"
+    args+=(--device=/dev/dxg)
+  fi
+
+  args+=(-v /mnt/wslg:/mnt/wslg)
+  args+=(-v /usr/lib/wsl:/usr/lib/wsl)
 
   args+=(
     -e WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
@@ -288,22 +371,18 @@ echo "Environment: $(is_wsl && echo WSL || echo Ubuntu)"
 echo "Image: $IMAGE_NAME"
 echo "Container: $CTN_NAME"
 workspace_label="$WORKSPACE_MOUNT"
-if [[ "$workspace_label" == "$HOME"/* ]]; then
-  workspace_label="~/${workspace_label#"$HOME"/}"
-fi
+workspace_label="$(shorten_home_path "$workspace_label")"
 echo "Workspace: $workspace_label"
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
   display_args=("${args[@]}")
   for i in "${!display_args[@]}"; do
-    if [[ "${display_args[$i]}" == "$HOME"/* ]]; then
-      display_args[$i]="~/${display_args[$i]#"$HOME"/}"
-    fi
+    display_args[$i]="$(shorten_home_path "${display_args[$i]}")"
   done
 
   printf 'docker'
   for arg in "${display_args[@]}"; do
-    if [[ "$arg" == "~/"* ]]; then
+    if [[ "$arg" == "~" || "$arg" == "~/"* || "$arg" == "~:"* ]]; then
       printf ' %s' "$arg"
     else
       printf ' %q' "$arg"

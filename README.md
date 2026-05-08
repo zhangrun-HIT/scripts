@@ -39,4 +39,8 @@ run_docker_image.sh yopo:latest yopo --dry-run
 The runner detects WSL automatically. In WSL, it adds WSLg and `/dev/dxg`
 bindings and rewrites container proxy values from `127.0.0.1` to
 `host.docker.internal`. It uses proxy port `7897`, GPU support, host networking,
-privileged mode, and `~/code:/root/code` by default.
+privileged mode, and `~:/root/host_home` by default.
+
+Bind mount sources and required WSL/GUI/GPU paths are checked before Docker
+runs. If a required path does not exist, the script exits with an error instead
+of starting a half-configured container.
