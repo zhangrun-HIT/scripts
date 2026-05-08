@@ -5,11 +5,11 @@ set -Eeuo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  run_docker_image.sh IMAGE [CONTAINER_NAME] [options]
+  run_docker_image.sh IMAGE CONTAINER_NAME [options]
 
 Examples:
   run_docker_image.sh yopo:latest yopo
-  run_docker_image.sh base_image:ubt20-ros1-cda ego-planner --proxy 7897
+  run_docker_image.sh base_image:ubt20-ros1-cda ego-planner
   run_docker_image.sh local/fastdronexi35:pc fast-drone --workspace ~/code:/root/code
 
 Options:
@@ -19,7 +19,7 @@ Options:
       --shm-size SIZE         Docker shm size. Default: 16g.
       --network MODE          Docker network mode. Default: host.
       --entrypoint CMD        Docker entrypoint. Default: bash.
-      --proxy VALUE           auto, none, PORT, HOST:PORT, or URL. Default: auto.
+      --proxy VALUE           none, auto, PORT, HOST:PORT, or URL. Default: 7897.
       --no-gpu                Do not pass GPU options.
       --no-privileged         Do not pass --privileged.
       --replace               Remove an existing container with the same name first.
@@ -27,6 +27,7 @@ Options:
   -h, --help                  Show this help.
 
 Notes:
+  - GPU, privileged mode, host networking, and ~/code:/root/code are enabled by default.
   - In WSL, localhost/127.0.0.1 proxy values are rewritten to host.docker.internal.
   - On native Ubuntu, localhost/127.0.0.1 proxy values are kept.
 EOF
@@ -105,7 +106,7 @@ WORKSPACE_MOUNT="${HOME}/code:/root/code"
 SHM_SIZE="16g"
 NETWORK_MODE="host"
 ENTRYPOINT="bash"
-PROXY_MODE="auto"
+PROXY_MODE="7897"
 USE_GPU=1
 USE_PRIVILEGED=1
 REPLACE=0
@@ -286,11 +287,28 @@ args+=("$IMAGE_NAME")
 echo "Environment: $(is_wsl && echo WSL || echo Ubuntu)"
 echo "Image: $IMAGE_NAME"
 echo "Container: $CTN_NAME"
-echo "Workspace: $WORKSPACE_MOUNT"
+workspace_label="$WORKSPACE_MOUNT"
+if [[ "$workspace_label" == "$HOME"/* ]]; then
+  workspace_label="~/${workspace_label#"$HOME"/}"
+fi
+echo "Workspace: $workspace_label"
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
+  display_args=("${args[@]}")
+  for i in "${!display_args[@]}"; do
+    if [[ "${display_args[$i]}" == "$HOME"/* ]]; then
+      display_args[$i]="~/${display_args[$i]#"$HOME"/}"
+    fi
+  done
+
   printf 'docker'
-  printf ' %q' "${args[@]}"
+  for arg in "${display_args[@]}"; do
+    if [[ "$arg" == "~/"* ]]; then
+      printf ' %s' "$arg"
+    else
+      printf ' %q' "$arg"
+    fi
+  done
   printf '\n'
   exit 0
 fi
