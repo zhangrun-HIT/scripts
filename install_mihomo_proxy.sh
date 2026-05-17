@@ -25,6 +25,7 @@ SKIP_SYSTEM_PROXY=0
 SKIP_DOCKER_PROXY=0
 DRY_RUN=0
 TMP_DIR=""
+MIHOMO_DEB_DIR=""
 
 declare -a EXTRA_HEADERS=()
 
@@ -374,7 +375,7 @@ install_prerequisites() {
 install_mihomo() {
   local tmp_dir="$1"
   local release_info="${tmp_dir}/mihomo-release.txt"
-  local deb_path="${tmp_dir}/mihomo.deb"
+  local deb_path=""
   local mihomo_arch=""
   local tag=""
   local asset_name=""
@@ -395,11 +396,18 @@ install_mihomo() {
   asset_url="${lines[2]:-}"
   [[ -n "$asset_url" ]] || die "could not resolve latest mihomo .deb asset"
 
+  MIHOMO_DEB_DIR="$(mktemp -d /tmp/mihomo-deb.XXXXXX)"
+  chmod 0755 "$MIHOMO_DEB_DIR"
+  deb_path="${MIHOMO_DEB_DIR}/mihomo.deb"
+
   log "Downloading mihomo ${tag} (${asset_name})"
   download_to "$asset_url" "$deb_path"
+  chmod 0644 "$deb_path"
 
   log "Installing mihomo package"
   run_root apt-get install -y "$deb_path"
+  rm -rf -- "$MIHOMO_DEB_DIR"
+  MIHOMO_DEB_DIR=""
 
   if command -v mihomo >/dev/null 2>&1; then
     log "Installed $(mihomo -v | head -n 1)"
@@ -727,7 +735,7 @@ main() {
   install_prerequisites
 
   TMP_DIR="$(mktemp -d)"
-  trap '[[ -n "${TMP_DIR:-}" ]] && rm -rf -- "$TMP_DIR"' EXIT
+  trap '[[ -n "${TMP_DIR:-}" ]] && rm -rf -- "$TMP_DIR"; [[ -n "${MIHOMO_DEB_DIR:-}" ]] && rm -rf -- "$MIHOMO_DEB_DIR"' EXIT
 
   log "Creating mihomo directories"
   run_root mkdir -p "$MIHOMO_CONFIG_DIR" "$MIHOMO_UI_DIR" "$MIHOMO_LOG_DIR"
