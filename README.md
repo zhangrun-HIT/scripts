@@ -85,3 +85,60 @@ block is written, so repeated runs do not create duplicate proxy exports. Use
 Bind mount sources and required WSL/GUI/GPU paths are checked before Docker
 runs. If a required path does not exist, the script exits with an error instead
 of starting a half-configured container.
+
+## Mihomo Proxy Installer
+
+```bash
+install_mihomo_proxy.sh --sub-url 'https://example.com/subscribe?...'
+```
+
+`install_mihomo_proxy.sh` installs or updates the latest MetaCubeX mihomo
+Linux `.deb` for the current system architecture, installs the latest
+MetaCubeXD web UI, downloads a subscription config, enables `mihomo.service`,
+and writes common system proxy settings for shells, apt, git, and Docker. At
+startup it installs the basic packages it needs, including `curl`, `python3`,
+`tar`, and CA certificates.
+
+For safer command history, store the subscription URL in a file instead of
+typing it directly:
+
+```bash
+mkdir -p ~/.config/mihomo
+chmod 700 ~/.config/mihomo
+printf '%s\n' 'https://example.com/subscribe?...' > ~/.config/mihomo/sub_url
+chmod 600 ~/.config/mihomo/sub_url
+install_mihomo_proxy.sh --sub-url-file ~/.config/mihomo/sub_url
+```
+
+Defaults:
+
+- HTTP proxy: `127.0.0.1:7897`
+- SOCKS proxy: `127.0.0.1:7891`
+- external controller: `0.0.0.0:9090`
+- external UI path: `/etc/mihomo/ui`
+- remote UI URL: `http://<server-ip>:9090/ui`
+
+The subscription downloader uses Clash Verge style headers by default and tries
+several common client `User-Agent` values if the first request is rejected. If a
+provider requires extra headers, pass them explicitly:
+
+```bash
+install_mihomo_proxy.sh \
+  --sub-url-file ~/.config/mihomo/sub_url \
+  --header 'Authorization: Bearer TOKEN'
+```
+
+Preview the installation without changing the system:
+
+```bash
+install_mihomo_proxy.sh --sub-url-file ~/.config/mihomo/sub_url --dry-run
+```
+
+Useful options:
+
+- `--download-proxy URL` uses an existing proxy while downloading releases and
+  the subscription.
+- `--user-agent VALUE` overrides the subscription fetch `User-Agent`.
+- `--skip-subscription` keeps the current `/etc/mihomo/config.yaml`.
+- `--skip-system-proxy` skips shell, apt, git, and Docker proxy settings.
+- `--skip-docker-proxy` skips only the Docker systemd proxy drop-in.

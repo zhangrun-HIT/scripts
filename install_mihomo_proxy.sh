@@ -236,49 +236,138 @@ github_latest_asset_url() {
   local repo="$1"
   local selector="$2"
   local json_file="$3"
+  local asset_arch="${4:-}"
 
   download_to "https://api.github.com/repos/${repo}/releases/latest" "$json_file"
 
-  python3 - "$selector" "$json_file" <<'PY'
+  python3 - "$selector" "$json_file" "$asset_arch" <<'PY'
 import json
 import re
 import sys
 
 selector = sys.argv[1]
 json_file = sys.argv[2]
+asset_arch = sys.argv[3] if len(sys.argv) > 3 else ""
 release = json.load(open(json_file, encoding="utf-8"))
 assets = release.get("assets", [])
 
+def emit(asset):
+    print(release.get("tag_name", ""))
+    print(asset.get("name", ""))
+    print(asset.get("browser_download_url", ""))
+    sys.exit(0)
+
+if selector == "mihomo-deb":
+    if not asset_arch:
+        print("mihomo architecture was not provided", file=sys.stderr)
+        sys.exit(1)
+
+    tag = release.get("tag_name", "")
+    candidates = [
+        asset for asset in assets
+        if asset.get("name", "").startswith(f"mihomo-linux-{asset_arch}-")
+        and asset.get("name", "").endswith(".deb")
+    ]
+
+    if not candidates:
+        available = [
+            asset.get("name", "")
+            for asset in assets
+            if asset.get("name", "").startswith("mihomo-linux-")
+            and asset.get("name", "").endswith(".deb")
+        ]
+        print(f"no mihomo linux .deb asset found for architecture: {asset_arch}", file=sys.stderr)
+        if available:
+            print("available .deb assets:", file=sys.stderr)
+            for name in available:
+                print(f"  {name}", file=sys.stderr)
+        sys.exit(1)
+
+    generic_name = f"mihomo-linux-{asset_arch}-{tag}.deb"
+
+    def score(asset):
+        name = asset.get("name", "")
+        if name == generic_name:
+            return (0, name)
+        match = re.match(rf"^mihomo-linux-{re.escape(asset_arch)}-v([0-9]+)-{re.escape(tag)}\.deb$", name)
+        if match:
+            return (10 + int(match.group(1)), name)
+        return (100, name)
+
+    emit(sorted(candidates, key=score)[0])
+
 for asset in assets:
     name = asset.get("name", "")
-    url = asset.get("browser_download_url", "")
-    if selector == "mihomo-deb":
-        if re.match(r"^mihomo-linux-amd64-v\d+\.\d+\.\d+.*\.deb$", name):
-            print(release.get("tag_name", ""))
-            print(name)
-            print(url)
-            sys.exit(0)
-    elif selector == "metacubexd-tgz":
+    if selector == "metacubexd-tgz":
         if name == "compressed-dist.tgz":
-            print(release.get("tag_name", ""))
-            print(name)
-            print(url)
-            sys.exit(0)
+            emit(asset)
 
 print(f"no matching asset for {selector}", file=sys.stderr)
 sys.exit(1)
 PY
 }
 
-install_prerequisites() {
-  require_cmd curl
-  require_cmd python3
-  require_cmd tar
-  require_cmd sed
-  require_cmd awk
+detect_mihomo_arch() {
+  local arch=""
 
+  if command -v dpkg >/dev/null 2>&1; then
+    arch="$(dpkg --print-architecture)"
+  else
+    arch="$(uname -m)"
+  fi
+
+  case "$arch" in
+    amd64|x86_64)
+      printf 'amd64\n'
+      ;;
+    arm64|aarch64)
+      printf 'arm64\n'
+      ;;
+    armhf|armv7l|armv7*)
+      printf 'armv7\n'
+      ;;
+    armel|armv6l|armv6*)
+      printf 'armv6\n'
+      ;;
+    i386|i686|386)
+      printf '386\n'
+      ;;
+    riscv64)
+      printf 'riscv64\n'
+      ;;
+    *)
+      die "unsupported system architecture for mihomo .deb: ${arch}"
+      ;;
+  esac
+}
+
+install_prerequisites() {
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
     require_cmd sudo
+  fi
+
+  require_cmd apt-get
+
+  log "Installing prerequisite packages"
+  run_root apt-get update
+  run_root apt-get install -y \
+    ca-certificates \
+    coreutils \
+    curl \
+    findutils \
+    gawk \
+    gzip \
+    python3 \
+    sed \
+    tar
+
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    require_cmd curl
+    require_cmd python3
+    require_cmd tar
+    require_cmd sed
+    require_cmd awk
+    require_cmd find
   fi
 }
 
@@ -286,16 +375,20 @@ install_mihomo() {
   local tmp_dir="$1"
   local release_info="${tmp_dir}/mihomo-release.txt"
   local deb_path="${tmp_dir}/mihomo.deb"
+  local mihomo_arch=""
   local tag=""
   local asset_name=""
   local asset_url=""
 
+  mihomo_arch="$(detect_mihomo_arch)"
+
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    log "Would resolve, download, and install the latest MetaCubeX/mihomo amd64 .deb"
+    log "Would resolve, download, and install the latest MetaCubeX/mihomo ${mihomo_arch} .deb"
     return 0
   fi
 
-  github_latest_asset_url "MetaCubeX/mihomo" "mihomo-deb" "${tmp_dir}/mihomo-release.json" > "$release_info"
+  log "Detected system architecture for mihomo: ${mihomo_arch}"
+  github_latest_asset_url "MetaCubeX/mihomo" "mihomo-deb" "${tmp_dir}/mihomo-release.json" "$mihomo_arch" > "$release_info"
   mapfile -t lines < "$release_info"
   tag="${lines[0]:-}"
   asset_name="${lines[1]:-}"
