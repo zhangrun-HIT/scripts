@@ -142,3 +142,26 @@ Useful options:
 - `--skip-subscription` keeps the current `/etc/mihomo/config.yaml`.
 - `--skip-system-proxy` skips shell, apt, git, and Docker proxy settings.
 - `--skip-docker-proxy` skips only the Docker systemd proxy drop-in.
+
+## Local Proxy Config
+
+```bash
+configure_proxy.sh
+configure_proxy.sh --proxy 192.168.31.10:7897
+```
+
+`configure_proxy.sh` only configures this machine's proxy settings. It does not
+install or manage mihomo. By default it writes `127.0.0.1:7897` into shell,
+`/etc/environment`, apt, system git, and Docker systemd proxy settings.
+
+For a preview:
+
+```bash
+configure_proxy.sh --dry-run
+```
+
+To remove the settings managed by the script:
+
+```bash
+configure_proxy.sh --unset
+```
