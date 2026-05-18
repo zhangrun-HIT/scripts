@@ -143,6 +143,54 @@ Useful options:
 - `--skip-system-proxy` skips shell, apt, git, and Docker proxy settings.
 - `--skip-docker-proxy` skips only the Docker systemd proxy drop-in.
 
+## Mihomo Config Refresher
+
+```bash
+refresh_mihomo_config.sh --sub-url 'https://example.com/subscribe?...'
+```
+
+`refresh_mihomo_config.sh` refreshes an existing mihomo installation without
+reinstalling mihomo or MetaCubeXD. It downloads the subscription config, runs a
+temporary Clash Verge compatible JavaScript customizer from GitHub, writes the
+transformed result to `/etc/mihomo/config.yaml`, stores the subscription URL in
+`/etc/mihomo/subscription.url`, and restarts `mihomo.service`. The downloaded
+customizer lives only in the script's temporary directory and is removed when
+the run finishes.
+
+The first run can provide the subscription URL directly:
+
+```bash
+refresh_mihomo_config.sh --sub-url 'https://example.com/subscribe?...'
+```
+
+After that, the stored URL is used automatically:
+
+```bash
+refresh_mihomo_config.sh
+```
+
+Defaults match the installer where they overlap:
+
+- HTTP proxy: `127.0.0.1:7897`
+- SOCKS proxy: `127.0.0.1:7891`
+- external controller: `0.0.0.0:9090`
+- external UI path: `/etc/mihomo/ui`
+- stored subscription URL: `/etc/mihomo/subscription.url`
+- customizer URL:
+  `https://raw.githubusercontent.com/zhangrun-HIT/clash-subscription-customizer/main/clash-verge-script.js`
+
+Use another GitHub raw URL if needed:
+
+```bash
+refresh_mihomo_config.sh --customizer-url https://raw.githubusercontent.com/OWNER/REPO/BRANCH/file.js
+```
+
+Preview the refresh without changing the system:
+
+```bash
+refresh_mihomo_config.sh --dry-run
+```
+
 ## Local Proxy Config
 
 ```bash
