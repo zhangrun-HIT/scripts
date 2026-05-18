@@ -200,7 +200,10 @@ configure_proxy.sh --proxy 192.168.31.10:7897
 
 `configure_proxy.sh` only configures this machine's proxy settings. It does not
 install or manage mihomo. By default it writes `127.0.0.1:7897` into shell,
-`/etc/environment`, apt, system git, and Docker systemd proxy settings.
+`/etc/environment`, apt, system git, and Docker systemd proxy settings. When it
+runs inside a Docker container on WSL, the default proxy becomes
+`host.docker.internal:7897` so the container can reach the WSL/Docker host
+proxy.
 
 For a preview:
 

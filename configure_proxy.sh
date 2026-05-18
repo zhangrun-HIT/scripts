@@ -4,7 +4,10 @@ set -Eeuo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
 
-PROXY_INPUT="127.0.0.1:7897"
+DEFAULT_PROXY_INPUT="127.0.0.1:7897"
+WSL_DOCKER_PROXY_INPUT="host.docker.internal:7897"
+PROXY_INPUT=""
+PROXY_EXPLICIT=0
 HTTP_PROXY_URL=""
 ALL_PROXY_URL=""
 NO_PROXY_LIST="localhost,127.0.0.1,::1,0.0.0.0,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12"
@@ -24,7 +27,9 @@ Usage:
   configure_proxy.sh --unset
 
 Options:
-      --proxy VALUE       Proxy address or URL. Default: 127.0.0.1:7897
+      --proxy VALUE       Proxy address or URL. Default: 127.0.0.1:7897.
+                          Inside WSL Docker containers, the default is
+                          host.docker.internal:7897.
                           HOST:PORT becomes http://HOST:PORT for http(s)
                           variables and socks5h://HOST:PORT for all_proxy.
       --all-proxy URL     Override all_proxy/ALL_PROXY. Default is derived
@@ -108,6 +113,7 @@ parse_args() {
       --proxy)
         [[ $# -ge 2 ]] || die "--proxy requires a value"
         PROXY_INPUT="$2"
+        PROXY_EXPLICIT=1
         shift 2
         ;;
       --all-proxy)
@@ -149,6 +155,28 @@ parse_args() {
         ;;
     esac
   done
+}
+
+is_wsl() {
+  grep -qiE '(microsoft|wsl)' /proc/sys/kernel/osrelease 2>/dev/null ||
+    grep -qiE '(microsoft|wsl)' /proc/version 2>/dev/null
+}
+
+is_container() {
+  [[ -f /.dockerenv ]] && return 0
+  grep -qaE '/(docker|containerd|kubepods)(/|[-:])' /proc/1/cgroup /proc/self/cgroup 2>/dev/null
+}
+
+select_default_proxy() {
+  if [[ "$PROXY_EXPLICIT" -eq 1 ]]; then
+    return 0
+  fi
+
+  if is_wsl && is_container; then
+    PROXY_INPUT="$WSL_DOCKER_PROXY_INPUT"
+  else
+    PROXY_INPUT="$DEFAULT_PROXY_INPUT"
+  fi
 }
 
 strip_scheme() {
@@ -376,6 +404,7 @@ EOF
 
 main() {
   parse_args "$@"
+  select_default_proxy
 
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
     require_cmd sudo
