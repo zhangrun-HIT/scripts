@@ -12,6 +12,7 @@ HTTP_PROXY_URL=""
 ALL_PROXY_URL=""
 NO_PROXY_LIST="localhost,127.0.0.1,::1,0.0.0.0,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12"
 SKIP_APT=0
+CONFIGURE_APT=0
 SKIP_GIT=0
 SKIP_DOCKER=0
 UNSET_PROXY=0
@@ -35,7 +36,9 @@ Options:
       --all-proxy URL     Override all_proxy/ALL_PROXY. Default is derived
                           from --proxy as socks5h://HOST:PORT.
       --no-proxy LIST     Override no_proxy/NO_PROXY.
-      --skip-apt          Do not configure apt proxy.
+      --apt               Configure apt proxy. By default apt is forced DIRECT
+                          so shell proxy variables do not affect apt.
+      --skip-apt          Do not change apt proxy settings.
       --skip-git          Do not configure system or global git proxy.
       --skip-docker       Do not configure Docker systemd proxy.
       --unset             Remove proxy settings managed by this script.
@@ -125,6 +128,11 @@ parse_args() {
         [[ $# -ge 2 ]] || die "--no-proxy requires a value"
         NO_PROXY_LIST="$2"
         shift 2
+        ;;
+      --apt)
+        CONFIGURE_APT=1
+        SKIP_APT=0
+        shift
         ;;
       --skip-apt)
         SKIP_APT=1
@@ -278,6 +286,16 @@ EOF
   run_root install -m 0644 "$apt_tmp" /etc/apt/apt.conf.d/95proxies
 }
 
+write_apt_direct_proxy() {
+  local apt_tmp="${TMP_DIR}/95proxies"
+
+  cat > "$apt_tmp" <<'EOF'
+Acquire::http::Proxy "DIRECT";
+Acquire::https::Proxy "DIRECT";
+EOF
+  run_root install -m 0644 "$apt_tmp" /etc/apt/apt.conf.d/95proxies
+}
+
 systemd_unit_exists() {
   local unit="$1"
   command -v systemctl >/dev/null 2>&1 || return 1
@@ -368,8 +386,10 @@ configure_proxy() {
   run_root install -m 0644 "$profile_tmp" /etc/profile.d/proxy.sh
   merge_environment_proxy
 
-  if [[ "$SKIP_APT" -eq 0 ]]; then
+  if [[ "$SKIP_APT" -eq 0 && "$CONFIGURE_APT" -eq 1 ]]; then
     write_apt_proxy
+  elif [[ "$SKIP_APT" -eq 0 ]]; then
+    write_apt_direct_proxy
   fi
 
   if [[ "$SKIP_GIT" -eq 0 ]]; then
