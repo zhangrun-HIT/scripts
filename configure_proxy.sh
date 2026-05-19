@@ -19,6 +19,8 @@ SKIP_DOCKER=0
 UNSET_PROXY=0
 DRY_RUN=0
 TMP_DIR=""
+BASHRC_PROXY_START="# >>> configure_proxy http env >>>"
+BASHRC_PROXY_END="# <<< configure_proxy http env <<<"
 
 usage() {
   cat <<'EOF'
@@ -37,9 +39,10 @@ Options:
       --all-proxy URL     Override all_proxy/ALL_PROXY. Default is derived
                           from --proxy as socks5h://HOST:PORT.
       --no-proxy LIST     Override no_proxy/NO_PROXY.
-      --http-env          Also export http_proxy/https_proxy environment
-                          variables. Disabled by default because apt reads
-                          them and some repositories fail through HTTP proxy.
+      --http-env          Also export http_proxy/https_proxy in system
+                          environment files. Disabled by default because apt
+                          reads them and some repositories fail through HTTP
+                          proxy. User ~/.bashrc always gets HTTP(S) exports.
       --apt               Configure apt proxy. By default apt is unchanged.
       --skip-apt          Do not change apt proxy settings.
       --skip-git          Do not configure system or global git proxy.
@@ -264,6 +267,127 @@ EOF
   } > "$tmp_file"
 }
 
+target_user() {
+  if [[ "${EUID:-$(id -u)}" -eq 0 && -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+    printf '%s\n' "$SUDO_USER"
+  else
+    id -un
+  fi
+}
+
+target_home() {
+  local user="$1"
+  local home=""
+
+  if command -v getent >/dev/null 2>&1; then
+    home="$(getent passwd "$user" | awk -F: '{ print $6 }')"
+  fi
+
+  if [[ -z "$home" ]]; then
+    if [[ "$user" == "$(id -un)" ]]; then
+      home="${HOME}"
+    else
+      home="/home/${user}"
+    fi
+  fi
+
+  printf '%s\n' "$home"
+}
+
+target_bashrc() {
+  local user
+  user="$(target_user)"
+  printf '%s/.bashrc\n' "$(target_home "$user")"
+}
+
+target_chown_spec() {
+  local user="$1"
+  local group=""
+
+  group="$(id -gn "$user" 2>/dev/null || true)"
+  if [[ -n "$group" ]]; then
+    printf '%s:%s\n' "$user" "$group"
+  else
+    printf '%s\n' "$user"
+  fi
+}
+
+write_bashrc_http_proxy_block() {
+  local tmp_file="$1"
+
+  cat > "$tmp_file" <<EOF
+${BASHRC_PROXY_START}
+export http_proxy="${HTTP_PROXY_URL}"
+export https_proxy="${HTTP_PROXY_URL}"
+export HTTP_PROXY="${HTTP_PROXY_URL}"
+export HTTPS_PROXY="${HTTP_PROXY_URL}"
+export no_proxy="${NO_PROXY_LIST}"
+export NO_PROXY="\$no_proxy"
+${BASHRC_PROXY_END}
+EOF
+}
+
+filter_bashrc_proxy_block() {
+  local input="$1"
+  local output="$2"
+
+  if [[ -f "$input" ]]; then
+    awk -v start="$BASHRC_PROXY_START" -v end="$BASHRC_PROXY_END" '
+      $0 == start { skip = 1; next }
+      $0 == end { skip = 0; next }
+      !skip { print }
+    ' "$input" > "$output"
+  else
+    : > "$output"
+  fi
+}
+
+merge_bashrc_http_proxy() {
+  local user=""
+  local bashrc=""
+  local filtered="${TMP_DIR}/bashrc.filtered"
+  local proxy_block="${TMP_DIR}/bashrc.proxy"
+  local merged="${TMP_DIR}/bashrc.merged"
+
+  user="$(target_user)"
+  bashrc="$(target_bashrc)"
+  write_bashrc_http_proxy_block "$proxy_block"
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "Would merge HTTP(S) proxy variables into ${bashrc}"
+    return 0
+  fi
+
+  filter_bashrc_proxy_block "$bashrc" "$filtered"
+  cat "$filtered" "$proxy_block" > "$merged"
+  install -m 0644 "$merged" "$bashrc"
+
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    chown "$(target_chown_spec "$user")" "$bashrc"
+  fi
+}
+
+unset_bashrc_http_proxy() {
+  local user=""
+  local bashrc=""
+  local filtered="${TMP_DIR}/bashrc.filtered"
+
+  user="$(target_user)"
+  bashrc="$(target_bashrc)"
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "Would remove HTTP(S) proxy variables from ${bashrc}"
+    return 0
+  fi
+
+  filter_bashrc_proxy_block "$bashrc" "$filtered"
+  install -m 0644 "$filtered" "$bashrc"
+
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    chown "$(target_chown_spec "$user")" "$bashrc"
+  fi
+}
+
 filter_environment_proxy() {
   local output="$1"
 
@@ -394,6 +518,7 @@ configure_proxy() {
   write_profile_proxy "$profile_tmp"
   run_root install -m 0644 "$profile_tmp" /etc/profile.d/proxy.sh
   merge_environment_proxy
+  merge_bashrc_http_proxy
 
   if [[ "$SKIP_APT" -eq 0 && "$CONFIGURE_APT" -eq 1 ]]; then
     write_apt_proxy
@@ -428,6 +553,7 @@ unset_proxy() {
   log "Removing proxy settings managed by ${SCRIPT_NAME}"
   run_optional_root rm -f /etc/profile.d/proxy.sh
   unset_environment_proxy
+  unset_bashrc_http_proxy
 
   if [[ "$SKIP_APT" -eq 0 ]]; then
     run_optional_root rm -f /etc/apt/apt.conf.d/95proxies
@@ -468,13 +594,16 @@ EOF
 
 Done.
   ALL:     ${ALL_PROXY_URL}
-  HTTP(S) env: ${http_env_status}
+  ~/.bashrc HTTP(S) env: enabled
+  system HTTP(S) env: ${http_env_status}
 
 Open a new shell or run:
   source /etc/profile.d/proxy.sh
+  source "$(target_bashrc)"
 
 Quick check:
   echo \$all_proxy
+  echo \$https_proxy
   curl -I https://www.google.com
 EOF
 }

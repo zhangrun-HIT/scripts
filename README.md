@@ -202,11 +202,12 @@ configure_proxy.sh --proxy 192.168.31.10:7897
 install or manage mihomo. By default it writes
 `all_proxy=socks5h://127.0.0.1:7897` into shell environment,
 `/etc/environment`, system/global git, and Docker systemd proxy settings. It
-does not export `http_proxy`/`https_proxy` unless `--http-env` is passed,
-because apt reads those environment variables and some repositories fail
-through HTTP proxy. Apt config is left unchanged by default; pass `--apt` only
-when apt should also use the proxy. When it runs inside a Docker container on
-WSL, the default proxy becomes
+also writes managed `http_proxy`/`https_proxy` exports to the target user's
+`~/.bashrc` for interactive terminals. It does not export HTTP(S) proxy
+variables in system environment files unless `--http-env` is passed, because
+apt reads those variables and some repositories fail through HTTP proxy. Apt
+config is left unchanged by default; pass `--apt` only when apt should also use
+the proxy. When it runs inside a Docker container on WSL, the default proxy becomes
 `host.docker.internal:7897` so the container can reach the WSL/Docker host
 proxy.
 
