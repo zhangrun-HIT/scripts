@@ -36,8 +36,7 @@ Options:
       --all-proxy URL     Override all_proxy/ALL_PROXY. Default is derived
                           from --proxy as socks5h://HOST:PORT.
       --no-proxy LIST     Override no_proxy/NO_PROXY.
-      --apt               Configure apt proxy. By default apt is forced DIRECT
-                          so shell proxy variables do not affect apt.
+      --apt               Configure apt proxy. By default apt is unchanged.
       --skip-apt          Do not change apt proxy settings.
       --skip-git          Do not configure system or global git proxy.
       --skip-docker       Do not configure Docker systemd proxy.
@@ -286,16 +285,6 @@ EOF
   run_root install -m 0644 "$apt_tmp" /etc/apt/apt.conf.d/95proxies
 }
 
-write_apt_direct_proxy() {
-  local apt_tmp="${TMP_DIR}/95proxies"
-
-  cat > "$apt_tmp" <<'EOF'
-Acquire::http::Proxy "DIRECT";
-Acquire::https::Proxy "DIRECT";
-EOF
-  run_root install -m 0644 "$apt_tmp" /etc/apt/apt.conf.d/95proxies
-}
-
 systemd_unit_exists() {
   local unit="$1"
   command -v systemctl >/dev/null 2>&1 || return 1
@@ -388,8 +377,6 @@ configure_proxy() {
 
   if [[ "$SKIP_APT" -eq 0 && "$CONFIGURE_APT" -eq 1 ]]; then
     write_apt_proxy
-  elif [[ "$SKIP_APT" -eq 0 ]]; then
-    write_apt_direct_proxy
   fi
 
   if [[ "$SKIP_GIT" -eq 0 ]]; then
