@@ -20,7 +20,7 @@ DOWNLOAD_PROXY=""
 SUB_URL="${MIHOMO_SUB_URL:-}"
 SUB_URL_SOURCE=""
 SUB_URL_PATH=""
-FETCH_UA="${MIHOMO_SUB_UA:-clash-verge/v2.4.2}"
+FETCH_UA="${MIHOMO_SUB_UA:-clash-verge/v2.4.0}"
 CUSTOM_UA=0
 DRY_RUN=0
 NO_RESTART=0
@@ -46,7 +46,7 @@ Options:
       --config-file FILE        Mihomo config to update.
                                 Default: /etc/mihomo/config.yaml
       --user-agent VALUE        User-Agent used when fetching the subscription.
-                                Default: clash-verge/v2.4.2
+                                Default: clash-verge/v2.4.0
       --header 'K: V'           Extra header for subscription fetch. Can repeat.
       --download-proxy URL      Proxy used by curl while downloading subscription.
       --http-port PORT          HTTP proxy port written to mihomo config.
@@ -315,7 +315,7 @@ fetch_subscription_config() {
   mapfile -d '' -t curl_cmd < <(curl_base)
 
   if [[ "$CUSTOM_UA" -eq 0 ]]; then
-    for candidate in "Clash Verge/v2.4.2" "clash-verge/v2.4.2" "clash-verge/v1.7.7" "ClashforWindows/0.20.39" "ClashMetaForAndroid/2.11.13" "clash"; do
+    for candidate in "clash-verge/v2.4.0" "Clash Verge/v2.4.0" "clash-verge/v2.4.2" "Clash Verge/v2.4.2" "clash-verge/v1.7.7" "ClashforWindows/0.20.39" "ClashMetaForAndroid/2.11.13" "clash"; do
       [[ "$candidate" == "$FETCH_UA" ]] && continue
       user_agents+=("$candidate")
     done
@@ -325,7 +325,7 @@ fetch_subscription_config() {
   for ua in "${user_agents[@]}"; do
     attempt=$((attempt + 1))
     attempt_file="${tmp_dir}/subscription.${attempt}.yaml"
-    header_args=(-H "User-Agent: ${ua}" -H "Accept: text/yaml,application/yaml,text/plain,*/*" -H "Accept-Language: zh-CN,zh;q=0.9,en;q=0.8" -H "Cache-Control: no-cache")
+    header_args=(-H "User-Agent: ${ua}" -H "Accept: */*" -H "Cache-Control: no-cache" -H "Pragma: no-cache")
     for header in "${EXTRA_HEADERS[@]}"; do
       header_args+=(-H "$header")
     done

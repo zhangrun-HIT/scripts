@@ -118,9 +118,10 @@ Defaults:
 - external UI path: `/etc/mihomo/ui`
 - remote UI URL: `http://<server-ip>:9090/ui`
 
-The subscription downloader uses Clash Verge style headers by default and tries
-several common client `User-Agent` values if the first request is rejected. If a
-provider requires extra headers, pass them explicitly:
+The subscription downloader uses Clash Verge style headers by default, matching
+the common `curl -A clash-verge/v2.4.0` provider test, and tries several client
+`User-Agent` values if the first request is rejected. If a provider requires
+extra headers, pass them explicitly:
 
 ```bash
 install_mihomo_proxy.sh \
