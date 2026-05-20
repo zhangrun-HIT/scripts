@@ -9,6 +9,9 @@ MIHOMO_UI_DIR="/etc/mihomo/ui"
 MIHOMO_LOG_DIR="/var/log/mihomo"
 MIHOMO_CONFIG_FILE="/etc/mihomo/config.yaml"
 SUB_URL_FILE="/etc/mihomo/subscription.url"
+GEOSITE_FILE="/etc/mihomo/GeoSite.dat"
+COUNTRY_MMDB_FILE="/etc/mihomo/Country.mmdb"
+GEOIP_METADB_FILE="/etc/mihomo/geoip.metadb"
 
 HTTP_PORT="7897"
 SOCKS_PORT="7891"
@@ -41,7 +44,8 @@ Options:
       --user-agent VALUE     User-Agent used when fetching the subscription.
                              Default: clash-verge/v2.4.0
       --header 'K: V'        Extra header for subscription fetch. Can repeat.
-      --download-proxy URL   Proxy used by curl while downloading releases/subscription.
+      --download-proxy URL   Proxy used by curl while downloading releases,
+                             subscription, and GEO data.
       --http-port PORT       HTTP proxy port written to mihomo/system config.
                              Default: 7897
       --socks-port PORT      SOCKS proxy port written to mihomo/system config.
@@ -231,6 +235,22 @@ download_to() {
   local -a curl_cmd=()
   mapfile -d '' -t curl_cmd < <(curl_base)
   run "${curl_cmd[@]}" "$url" --output "$output"
+}
+
+download_first_available() {
+  local output="$1"
+  local url=""
+  shift
+
+  for url in "$@"; do
+    if download_to "$url" "$output"; then
+      [[ "$DRY_RUN" -eq 1 || -s "$output" ]] && return 0
+    fi
+    warn "download failed: ${url}"
+    rm -f -- "$output"
+  done
+
+  return 1
 }
 
 github_latest_asset_url() {
@@ -463,9 +483,163 @@ backup_config_if_needed() {
   fi
 }
 
+sanitize_subscription_config() {
+  local input="$1"
+  local output="$2"
+
+  python3 - "$input" "$output" <<'PY'
+import re
+import sys
+
+input_path, output_path = sys.argv[1], sys.argv[2]
+text = open(input_path, encoding="utf-8").read()
+
+if not re.search(r"^(proxies|proxy-providers|proxy-groups|rules|mixed-port|port|socks-port):", text, re.M):
+    print("normal mihomo YAML keys were not detected", file=sys.stderr)
+    sys.exit(1)
+
+if re.search(r"^proxies:\s*\{\s*\}\s*$", text, re.M):
+    print("subscription contains an empty top-level proxies map", file=sys.stderr)
+    sys.exit(1)
+
+if re.search(r"^\s+proxies:\s*\{\s*\}\s*$", text, re.M) and not re.search(r"^proxy-providers:", text, re.M):
+    print("subscription contains empty proxy-group proxies maps", file=sys.stderr)
+    sys.exit(1)
+
+if re.search(r"^proxies:\s*$", text, re.M) and not re.search(r"^proxy-providers:", text, re.M):
+    proxy_block = re.search(r"^proxies:\s*\n(?P<body>.*?)(?=^[^ \t#].*?:|\Z)", text, re.M | re.S)
+    body = proxy_block.group("body") if proxy_block else ""
+    if not re.search(r"^\s{4}server:", body, re.M) or not re.search(r"^\s{4}port:", body, re.M):
+        print("subscription proxies do not include complete server/port nodes", file=sys.stderr)
+        sys.exit(1)
+
+lines = text.splitlines()
+out = []
+node = []
+
+def flush_node():
+    global node
+    if not node:
+        return
+    is_anytls = any(re.match(r"^\s{4}type:\s*anytls\s*$", line, re.I) for line in node)
+    has_fingerprint = any(re.match(r"^\s{4}client-fingerprint:", line) for line in node)
+    for line in node:
+        out.append(line)
+        if is_anytls and not has_fingerprint and re.match(r"^\s{4}type:\s*anytls\s*$", line, re.I):
+            out.append("    client-fingerprint: chrome")
+    node = []
+
+for line in lines:
+    if re.match(r"^\s{2}-\s*$", line):
+        flush_node()
+        node = [line]
+    elif node and re.match(r"^[^ \t#].*?:", line):
+        flush_node()
+        out.append(line)
+    elif node:
+        node.append(line)
+    else:
+        out.append(line)
+
+flush_node()
+open(output_path, "w", encoding="utf-8").write("\n".join(out) + "\n")
+PY
+}
+
+copy_cached_geodata() {
+  local target="$1"
+  shift
+  local user_home=""
+  local base=""
+  local name=""
+  local source=""
+  local -a bases=()
+
+  if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+    user_home="$(getent passwd "$SUDO_USER" 2>/dev/null | awk -F: '{ print $6 }' || true)"
+  fi
+  [[ -n "$user_home" ]] || user_home="${HOME:-}"
+
+  if [[ -n "$user_home" ]]; then
+    bases+=(
+      "${user_home}/.config/mihomo"
+      "${user_home}/.local/share/io.github.clash-verge-rev.clash-verge-rev"
+    )
+  fi
+
+  for base in "${bases[@]}"; do
+    for name in "$@"; do
+      source="${base}/${name}"
+      if [[ -s "$source" ]]; then
+        log "Using cached GEO data ${source}"
+        run_root install -m 0644 "$source" "$target"
+        return 0
+      fi
+    done
+  done
+
+  return 1
+}
+
+install_geodata_file() {
+  local label="$1"
+  local target="$2"
+  shift 2
+  local tmp_file="${TMP_DIR}/${label}.download"
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "Would prepare GEO data ${target}"
+    return 0
+  fi
+
+  if download_first_available "$tmp_file" "$@"; then
+    log "Installing GEO data ${target}"
+    run_root install -m 0644 "$tmp_file" "$target"
+    return 0
+  fi
+
+  case "$target" in
+    "$GEOSITE_FILE")
+      copy_cached_geodata "$target" GeoSite.dat geosite.dat && return 0
+      ;;
+    "$COUNTRY_MMDB_FILE")
+      copy_cached_geodata "$target" Country.mmdb country.mmdb && return 0
+      ;;
+    "$GEOIP_METADB_FILE")
+      copy_cached_geodata "$target" geoip.metadb && return 0
+      ;;
+  esac
+
+  if run_root test -s "$target"; then
+    warn "keeping existing GEO data after download failures: ${target}"
+    return 0
+  fi
+
+  warn "could not prepare GEO data ${target}; rerun with --download-proxy if mihomo startup downloads time out"
+  return 1
+}
+
+prepare_mihomo_geodata() {
+  log "Preparing mihomo GEO data"
+  run_root mkdir -p "$MIHOMO_CONFIG_DIR"
+
+  install_geodata_file geosite "$GEOSITE_FILE" \
+    "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat" \
+    "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat" || true
+
+  install_geodata_file country "$COUNTRY_MMDB_FILE" \
+    "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb" \
+    "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/country.mmdb" || true
+
+  install_geodata_file geoip-metadb "$GEOIP_METADB_FILE" \
+    "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.metadb" \
+    "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb" || true
+}
+
 fetch_subscription_config() {
   local tmp_dir="$1"
   local output="${tmp_dir}/config.yaml"
+  local normalized_file=""
   local -a curl_cmd=()
   local -a header_args=()
   local -a user_agents=("$FETCH_UA")
@@ -495,6 +669,7 @@ fetch_subscription_config() {
   for ua in "${user_agents[@]}"; do
     attempt=$((attempt + 1))
     attempt_file="${tmp_dir}/config.${attempt}.yaml"
+    normalized_file="${tmp_dir}/config.${attempt}.normalized.yaml"
     header_args=(-H "User-Agent: ${ua}" -H "Accept: */*" -H "Cache-Control: no-cache" -H "Pragma: no-cache")
     for header in "${EXTRA_HEADERS[@]}"; do
       header_args+=(-H "$header")
@@ -515,29 +690,25 @@ fetch_subscription_config() {
       continue
     fi
 
-    if grep -qE '^(proxies|proxy-providers|proxy-groups|rules|mixed-port|port|socks-port):' "$attempt_file"; then
-      cp "$attempt_file" "$output"
+    if sanitize_subscription_config "$attempt_file" "$normalized_file"; then
+      cp "$normalized_file" "$output"
       log "Subscription fetched successfully with User-Agent: ${ua}"
       best_file=""
       break
     fi
+    warn "subscription response is not usable with User-Agent: ${ua}"
 
     if [[ -z "$best_file" ]]; then
-      best_file="$attempt_file"
+      best_file="$normalized_file"
       best_ua="$ua"
     fi
   done
 
   if [[ ! -s "$output" && -n "$best_file" ]]; then
-    cp "$best_file" "$output"
-    warn "subscription response fetched with User-Agent: ${best_ua}, but it does not look like a normal mihomo YAML config"
+    warn "best subscription response was fetched with User-Agent: ${best_ua}, but it was rejected as unusable"
   fi
 
   [[ -s "$output" ]] || die "could not fetch a usable subscription config; try --user-agent or --header"
-
-  if ! grep -qE '^(proxies|proxy-providers|proxy-groups|rules|mixed-port|port|socks-port):' "$output"; then
-    warn "installing subscription response even though normal mihomo YAML keys were not detected"
-  fi
 
   backup_config_if_needed
   run_root mkdir -p "$MIHOMO_CONFIG_DIR"
@@ -586,6 +757,26 @@ configure_mihomo_yaml() {
   set_yaml_key "external-controller" "$(yaml_quote "$CONTROLLER_ADDR")" "$tmp_file"
   set_yaml_key "external-ui" "$MIHOMO_UI_DIR" "$tmp_file"
   set_yaml_key "secret" "$(yaml_quote "$SECRET")" "$tmp_file"
+}
+
+validate_mihomo_config() {
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "Would test mihomo configuration"
+    return 0
+  fi
+
+  if ! command -v mihomo >/dev/null 2>&1; then
+    warn "mihomo command was not found; skipped config test"
+    return 0
+  fi
+
+  log "Testing mihomo configuration"
+  if ! run_root env \
+    -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+    -u all_proxy -u ALL_PROXY \
+    timeout 120 mihomo -t -d "$MIHOMO_CONFIG_DIR"; then
+    die "mihomo config test failed; if GEO downloads timed out, rerun with --download-proxy"
+  fi
 }
 
 write_profile_proxy() {
@@ -748,6 +939,8 @@ main() {
   fi
 
   configure_mihomo_yaml "$TMP_DIR"
+  prepare_mihomo_geodata
+  validate_mihomo_config
 
   if [[ "$SKIP_SYSTEM_PROXY" -eq 0 ]]; then
     configure_system_proxy "$TMP_DIR"

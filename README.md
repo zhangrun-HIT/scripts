@@ -120,14 +120,30 @@ Defaults:
 
 The subscription downloader uses Clash Verge style headers by default, matching
 the common `curl -A clash-verge/v2.4.0` provider test, and tries several client
-`User-Agent` values if the first request is rejected. If a provider requires
-extra headers, pass them explicitly:
+`User-Agent` values if the first response is rejected or looks like an empty
+node config. If a provider requires extra headers, pass them explicitly:
 
 ```bash
 install_mihomo_proxy.sh \
   --sub-url-file ~/.config/mihomo/sub_url \
   --header 'Authorization: Bearer TOKEN'
 ```
+
+On a fresh machine, GEO database downloads may fail before mihomo's own proxy is
+available. In that case, borrow an existing LAN proxy for the install run. The
+same proxy is used for release downloads, the subscription, and GEO data:
+
+```bash
+install_mihomo_proxy.sh \
+  --sub-url-file ~/.config/mihomo/sub_url \
+  --download-proxy http://192.168.31.6:7897
+```
+
+The installer also rejects empty subscription responses, adds a default
+`client-fingerprint: chrome` for AnyTLS nodes when the provider omits it,
+prepares `GeoSite.dat`, `Country.mmdb`, and `geoip.metadb` before starting the
+service, and runs `mihomo -t` so bad configs fail before system proxy settings
+point shells at a broken local port.
 
 Preview the installation without changing the system:
 
@@ -137,8 +153,8 @@ install_mihomo_proxy.sh --sub-url-file ~/.config/mihomo/sub_url --dry-run
 
 Useful options:
 
-- `--download-proxy URL` uses an existing proxy while downloading releases and
-  the subscription.
+- `--download-proxy URL` uses an existing proxy while downloading releases, the
+  subscription, and GEO data.
 - `--user-agent VALUE` overrides the subscription fetch `User-Agent`.
 - `--skip-subscription` keeps the current `/etc/mihomo/config.yaml`.
 - `--skip-system-proxy` skips shell, apt, git, and Docker proxy settings.

@@ -298,9 +298,73 @@ curl_base() {
   printf '%s\0' "${args[@]}"
 }
 
+sanitize_subscription_config() {
+  local input="$1"
+  local output="$2"
+
+  python3 - "$input" "$output" <<'PY'
+import re
+import sys
+
+input_path, output_path = sys.argv[1], sys.argv[2]
+text = open(input_path, encoding="utf-8").read()
+
+if not re.search(r"^(proxies|proxy-providers|proxy-groups|rules|mixed-port|port|socks-port):", text, re.M):
+    print("normal mihomo YAML keys were not detected", file=sys.stderr)
+    sys.exit(1)
+
+if re.search(r"^proxies:\s*\{\s*\}\s*$", text, re.M):
+    print("subscription contains an empty top-level proxies map", file=sys.stderr)
+    sys.exit(1)
+
+if re.search(r"^\s+proxies:\s*\{\s*\}\s*$", text, re.M) and not re.search(r"^proxy-providers:", text, re.M):
+    print("subscription contains empty proxy-group proxies maps", file=sys.stderr)
+    sys.exit(1)
+
+if re.search(r"^proxies:\s*$", text, re.M) and not re.search(r"^proxy-providers:", text, re.M):
+    proxy_block = re.search(r"^proxies:\s*\n(?P<body>.*?)(?=^[^ \t#].*?:|\Z)", text, re.M | re.S)
+    body = proxy_block.group("body") if proxy_block else ""
+    if not re.search(r"^\s{4}server:", body, re.M) or not re.search(r"^\s{4}port:", body, re.M):
+        print("subscription proxies do not include complete server/port nodes", file=sys.stderr)
+        sys.exit(1)
+
+lines = text.splitlines()
+out = []
+node = []
+
+def flush_node():
+    global node
+    if not node:
+        return
+    is_anytls = any(re.match(r"^\s{4}type:\s*anytls\s*$", line, re.I) for line in node)
+    has_fingerprint = any(re.match(r"^\s{4}client-fingerprint:", line) for line in node)
+    for line in node:
+        out.append(line)
+        if is_anytls and not has_fingerprint and re.match(r"^\s{4}type:\s*anytls\s*$", line, re.I):
+            out.append("    client-fingerprint: chrome")
+    node = []
+
+for line in lines:
+    if re.match(r"^\s{2}-\s*$", line):
+        flush_node()
+        node = [line]
+    elif node and re.match(r"^[^ \t#].*?:", line):
+        flush_node()
+        out.append(line)
+    elif node:
+        node.append(line)
+    else:
+        out.append(line)
+
+flush_node()
+open(output_path, "w", encoding="utf-8").write("\n".join(out) + "\n")
+PY
+}
+
 fetch_subscription_config() {
   local tmp_dir="$1"
   local output="${tmp_dir}/subscription.yaml"
+  local normalized_file=""
   local -a curl_cmd=()
   local -a header_args=()
   local -a user_agents=("$FETCH_UA")
@@ -325,6 +389,7 @@ fetch_subscription_config() {
   for ua in "${user_agents[@]}"; do
     attempt=$((attempt + 1))
     attempt_file="${tmp_dir}/subscription.${attempt}.yaml"
+    normalized_file="${tmp_dir}/subscription.${attempt}.normalized.yaml"
     header_args=(-H "User-Agent: ${ua}" -H "Accept: */*" -H "Cache-Control: no-cache" -H "Pragma: no-cache")
     for header in "${EXTRA_HEADERS[@]}"; do
       header_args+=(-H "$header")
@@ -345,29 +410,25 @@ fetch_subscription_config() {
       continue
     fi
 
-    if grep -qE '^(proxies|proxy-providers|proxy-groups|rules|mixed-port|port|socks-port):' "$attempt_file"; then
-      cp "$attempt_file" "$output"
+    if sanitize_subscription_config "$attempt_file" "$normalized_file"; then
+      cp "$normalized_file" "$output"
       log "Subscription fetched successfully with User-Agent: ${ua}"
       best_file=""
       break
     fi
+    warn "subscription response is not usable with User-Agent: ${ua}"
 
     if [[ -z "$best_file" ]]; then
-      best_file="$attempt_file"
+      best_file="$normalized_file"
       best_ua="$ua"
     fi
   done
 
   if [[ ! -s "$output" && -n "$best_file" ]]; then
-    cp "$best_file" "$output"
-    warn "subscription response fetched with User-Agent: ${best_ua}, but it does not look like a normal mihomo YAML config"
+    warn "best subscription response was fetched with User-Agent: ${best_ua}, but it was rejected as unusable"
   fi
 
   [[ -s "$output" ]] || die "could not fetch a usable subscription config; try --user-agent or --header"
-
-  if ! grep -qE '^(proxies|proxy-providers|proxy-groups|rules|mixed-port|port|socks-port):' "$output"; then
-    warn "installing subscription response even though normal mihomo YAML keys were not detected"
-  fi
 }
 
 fetch_customizer_js() {
@@ -479,6 +540,16 @@ controller, external_ui, secret = sys.argv[6], sys.argv[7], sys.argv[8]
 
 with open(input_yaml, encoding="utf-8") as f:
     data = yaml.safe_load(f) or {}
+
+proxies = data.get("proxies")
+if proxies == {}:
+    raise SystemExit("subscription contains an empty top-level proxies map")
+if isinstance(proxies, list):
+    for proxy in proxies:
+        if not isinstance(proxy, dict):
+            continue
+        if str(proxy.get("type", "")).lower() == "anytls":
+            proxy.setdefault("client-fingerprint", "chrome")
 
 data["port"] = http_port
 data["socks-port"] = socks_port
