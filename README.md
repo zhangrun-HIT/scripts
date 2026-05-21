@@ -154,6 +154,71 @@ configure_proxy.sh --dry-run
 configure_proxy.sh --unset --dry-run
 ```
 
+### `select_clash_node.py`
+
+用途：测试 Clash Verge/Mihomo 里所有真实节点对 GitHub、Google、YouTube 等常见站点的综合访问速度，并把 `Proxy` 组切换到综合最优节点。
+
+它通过 Mihomo `external-controller` 接口工作。Clash Verge Rev 里需要开启外部控制器；常见地址是 `127.0.0.1:9097`，密钥通常跟配置里的 `secret` 一致。
+
+默认测试目标：
+
+- `https://www.google.com/generate_204`
+- `https://www.gstatic.com/generate_204`
+- `https://github.com/`
+- `https://github.githubassets.com/favicons/favicon.svg`
+- `https://avatars.githubusercontent.com/u/9919?v=4`
+- `https://api.github.com/rate_limit`
+- `https://raw.githubusercontent.com/github/gitignore/main/README.md`
+- `https://api.openai.com/v1/models`
+- `https://chatgpt.com/`
+- `https://www.youtube.com/generate_204`
+- `https://www.cloudflare.com/cdn-cgi/trace`
+
+只看排名，不切换：
+
+```bash
+select_clash_node.py --dry-run
+```
+
+测试并切换 `Proxy` 到最佳节点：
+
+```bash
+select_clash_node.py
+```
+
+默认切换后会关闭 Clash 现有连接，让浏览器里的 GitHub、Google 等页面重新走新节点。若想保留当前连接，可以传：
+
+```bash
+select_clash_node.py --keep-connections
+```
+
+如果你的控制器不是默认端口，显式指定：
+
+```bash
+select_clash_node.py --api http://127.0.0.1:9097 --secret set-your-secret
+```
+
+每个节点每个目标测两轮，更稳但更慢：
+
+```bash
+select_clash_node.py --rounds 2
+```
+
+只测试名字匹配新加坡或日本的节点：
+
+```bash
+select_clash_node.py --include-regex '新加坡|日本|Singapore|Japan'
+```
+
+临时替换测试目标，格式是 `name,url[,weight]`：
+
+```bash
+select_clash_node.py \
+  --target google,https://www.google.com/generate_204,1.2 \
+  --target github,https://github.com/,1.2 \
+  --target raw,https://raw.githubusercontent.com/github/gitignore/main/README.md,1.0
+```
+
 ### `install_mihomo_proxy.sh`
 
 用途：安装、更新或卸载 mihomo，并配置 MetaCubeXD UI、订阅、GEO 数据和系统代理。
