@@ -2,6 +2,13 @@
 # Add the current scripts directory to ~/.bashrc PATH.
 set -Eeuo pipefail
 
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd -P)"
+SCRIPT_PATH="${SCRIPT_DIR}/$(basename -- "$SCRIPT_PATH")"
+# shellcheck source=lib/self_update.sh
+source "${SCRIPT_DIR}/lib/self_update.sh"
+scripts_self_update "$SCRIPT_DIR" "$SCRIPT_PATH" "$@"
+
 TARGET_DIR="${1:-$(pwd -P)}"
 BASHRC="${HOME}/.bashrc"
 ENV_VAR_NAME="USER_SCRIPTS_DIR"

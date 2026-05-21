@@ -2,6 +2,13 @@
 # Refresh /etc/mihomo/config.yaml from a subscription and a GitHub-hosted customizer.
 set -Eeuo pipefail
 
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd -P)"
+SCRIPT_PATH="${SCRIPT_DIR}/$(basename -- "$SCRIPT_PATH")"
+# shellcheck source=lib/self_update.sh
+source "${SCRIPT_DIR}/lib/self_update.sh"
+scripts_self_update "$SCRIPT_DIR" "$SCRIPT_PATH" "$@"
+
 SCRIPT_NAME="$(basename "$0")"
 
 MIHOMO_CONFIG_DIR="/etc/mihomo"

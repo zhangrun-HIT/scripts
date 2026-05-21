@@ -1,106 +1,184 @@
-# Personal Scripts
+# 个人脚本工具箱
 
-Small helper scripts for Docker, ROS, WSL, and local development.
+这个仓库放的是日常在 WSL、Ubuntu、Docker、代理和 mihomo 环境里反复会用到的小脚本。默认推荐先运行 `install_path.sh`，把仓库加入 `PATH`，之后就可以在任意目录直接调用这些命令。
 
-## Install
+## 安装到 PATH
 
-Run this from the repository directory:
+在仓库目录下运行：
 
 ```bash
 ./install_path.sh
 source ~/.bashrc
 ```
 
-The installer permanently adds the current directory to `PATH` in `~/.bashrc`.
-It updates the existing managed block when run again, so it does not duplicate
-the same `PATH` entry. It also loads Bash completions from `completions/*.bash`
-for interactive shells.
+`install_path.sh` 会在 `~/.bashrc` 中写入一个受管理的配置块：
 
-## Docker Image Runner
+- 设置 `USER_SCRIPTS_DIR` 指向当前脚本仓库。
+- 把脚本仓库加入 `PATH`。
+- 在交互式 Bash 中自动加载 `completions/*.bash` 里的补全脚本。
+- 重复运行时会更新旧配置块，不会重复追加多份 PATH。
+
+## 启动前自动更新
+
+每个可直接运行的脚本都会在真正执行前快速检查当前仓库是不是落后于远端分支：
+
+- 仓库干净且本地落后远端时，脚本会执行 `git pull --ff-only`，然后用最新版本重新启动当前脚本。
+- 如果仓库有本地未提交改动、分支发生分叉、没有 Git、没有网络、不是 Git 仓库，脚本会跳过自动更新并继续执行本地版本。
+- 检查会尽量快速完成，避免因为网络问题长时间卡住。
+- 临时跳过自更新可以设置：
 
 ```bash
-run_docker_image.sh IMAGE CONTAINER_NAME [options]
+SCRIPTS_SELF_UPDATE=0 configure_proxy.sh --dry-run
 ```
 
-Examples:
+内部实现放在 `lib/self_update.sh`，这个文件是公共辅助库，不需要手动运行。
+
+## 脚本清单
+
+### `install_path.sh`
+
+用途：把当前脚本仓库安装到当前用户的 Bash 环境中。
+
+它适合在新机器、WSL、服务器或刚 clone 仓库后运行一次。运行后，新开的 shell 会自动找到本仓库里的脚本命令，也会自动加载 Docker 镜像名补全等补全脚本。
+
+常用命令：
+
+```bash
+cd ~/tools/scripts
+./install_path.sh
+source ~/.bashrc
+```
+
+如果要把别的目录写入 PATH，也可以显式传入目录：
+
+```bash
+./install_path.sh /home/zhangrun/tools/scripts
+```
+
+### `run_docker_image.sh`
+
+用途：用统一方式启动带 GPU、GUI、host 网络、代理和常用挂载的 Docker 容器。
+
+它主要服务 ROS、无人机、YOPO、EGO-Planner、Fast-Drone 这类需要图形界面、GPU 或宿主机源码挂载的开发容器。脚本会根据当前环境自动处理 WSL 和普通 Ubuntu 的差异。
+
+默认行为：
+
+- 默认启用 GPU 参数、`--privileged`、`--network host`。
+- 默认挂载 `~:/root/host_home`。
+- 默认共享内存大小为 `16g`。
+- 默认入口是 `bash`。
+- 在 WSL 中自动添加 WSLg、`/dev/dxg`、图形和音频相关挂载。
+- 在 WSL 中把容器里的 `127.0.0.1` 代理改写成 `host.docker.internal`。
+- 在普通 Ubuntu 中保留 `127.0.0.1` 代理。
+- 进入容器前会写入受管理的 shell、apt、git 代理配置和 GUI 环境变量，重复运行不会堆叠重复配置。
+
+常用命令：
 
 ```bash
 run_docker_image.sh yopo:latest yopo
 run_docker_image.sh base_image:ubt20-ros1-cda ego-planner
-run_docker_image.sh yopo:latest yopo --workspace ~/code:/root/code
-run_docker_image.sh yopo:latest yopo --volume ~/datasets:/root/datasets
+run_docker_image.sh local/fastdronexi35:pc fast-drone --workspace ~/code/Fast-Drone-XI35:/root/Fast-Drone-XI35
 ```
 
-`--workspace` and `--volume` are both Docker bind mounts, but the script treats
-them differently:
+挂载说明：
 
-- `--workspace` sets the primary work directory mount. It can be used once and
-  replaces the default `~:/root/host_home` mount. For example,
-  `--workspace ~/code:/root/code` mounts only `~/code` as `/root/code`.
-- `--volume` adds extra mounts. It can be used multiple times and does not
-  replace the workspace mount. For example,
-  `--volume ~/datasets:/root/datasets` keeps the default workspace mount and
-  also mounts `~/datasets` as `/root/datasets`.
+- `--workspace SRC[:DST]` 是主工作目录挂载，只能设置一个；不传时默认 `~:/root/host_home`。
+- `--volume SRC:DST` 是额外挂载，可以重复传多个。
 
-Preview the generated Docker command without running it:
+预览 Docker 命令但不启动：
 
 ```bash
 run_docker_image.sh yopo:latest yopo --dry-run
 ```
 
-Press Tab after the first argument position to complete local Docker image
-names:
+常用选项：
+
+- `--proxy none`：不向容器写入代理。
+- `--proxy auto`：从当前 shell 的 proxy 环境变量推断代理。
+- `--proxy 7897` 或 `--proxy 192.168.31.6:7897`：指定代理端口或地址。
+- `--replace`：如果同名容器已经存在，先删除再创建。
+- `--no-gpu`：不传 GPU 参数。
+- `--no-privileged`：不使用 privileged 模式。
+- `--entrypoint CMD`：覆盖默认入口。
+
+补全：
 
 ```bash
 run_docker_image.sh yo<Tab>
 ```
 
-The runner detects WSL automatically. In WSL, it adds WSLg and `/dev/dxg`
-bindings and rewrites container proxy values from `127.0.0.1` to
-`host.docker.internal`. It uses proxy port `7897`, GPU support, host networking,
-privileged mode, and `~:/root/host_home` by default.
+补全逻辑来自 `completions/run_docker_image.bash`，它只负责给 `run_docker_image.sh` 补全本地 Docker 镜像名，不需要单独运行。
 
-GUI environment defaults are selected by host type:
+### `configure_proxy.sh`
 
-- WSL: `DISPLAY=:0`
-- native Ubuntu: `DISPLAY=:1`
+用途：给当前机器配置或移除通用代理环境。
 
-The selected GUI environment is written into managed shell/environment config
-inside the container, so existing `DISPLAY` lines are updated instead of
-duplicated.
+它只负责系统代理设置，不安装 mihomo。适合在已经有可用代理端口时，把 shell、git、Docker、可选 apt 代理统一写好；也适合一键清理这些代理设置。
 
-When proxy is enabled, the container is configured before the interactive shell
-opens:
+默认代理选择：
 
-- proxy environment variables are passed to Docker and written into managed
-  shell config blocks
-- apt proxy config is updated in `/etc/apt/apt.conf.d/95proxies`
-- git global `http.proxy` and `https.proxy` are updated when git is installed
+- 普通 Ubuntu 默认使用 `127.0.0.1:7897`。
+- WSL Docker 容器中默认使用 `host.docker.internal:7897`。
+- 显式传 `--proxy` 时，以用户传入值为准。
 
-Existing proxy environment lines managed by the script are updated in place, and
-direct proxy exports in the touched shell files are removed before the managed
-block is written, so repeated runs do not create duplicate proxy exports. Use
-`--proxy none` to remove the script-managed proxy config.
+常用命令：
 
-Bind mount sources and required WSL/GUI/GPU paths are checked before Docker
-runs. If a required path does not exist, the script exits with an error instead
-of starting a half-configured container.
+```bash
+configure_proxy.sh
+configure_proxy.sh --proxy 192.168.31.6:7897
+configure_proxy.sh --proxy http://127.0.0.1:7897 --all-proxy socks5h://127.0.0.1:7897
+configure_proxy.sh --unset
+```
 
-## Mihomo Proxy Installer
+它会写入或清理：
+
+- 当前用户 `~/.bashrc` 中受管理的代理块。
+- `/etc/profile.d/proxy.sh`。
+- `/etc/environment` 中的代理变量。
+- git 的 system/global proxy。
+- GitHub SSH 走 `ssh.github.com:443` 的配置块。
+- Docker systemd proxy drop-in。
+- 可选 apt proxy。
+
+重要默认值：
+
+- 默认不把 HTTP/HTTPS 代理写入系统环境文件，避免 apt 走 HTTP 代理后某些源失败。
+- 默认不修改 apt，除非显式传 `--apt`。
+- `--http-env` 会把 HTTP/HTTPS 代理也写到系统环境文件。
+- `--skip-apt`、`--skip-git`、`--skip-docker` 可以跳过对应部分。
+
+预览但不修改：
+
+```bash
+configure_proxy.sh --dry-run
+configure_proxy.sh --unset --dry-run
+```
+
+### `install_mihomo_proxy.sh`
+
+用途：安装、更新或卸载 mihomo，并配置 MetaCubeXD UI、订阅、GEO 数据和系统代理。
+
+安装模式会完成一整套 mihomo 环境：
+
+- 自动安装基础依赖。
+- 按当前架构下载并安装最新 MetaCubeX/mihomo `.deb`。
+- 下载并安装最新 MetaCubeXD Web UI 到 `/etc/mihomo/ui`。
+- 下载订阅并写入 `/etc/mihomo/config.yaml`。
+- 保存订阅地址到 `/etc/mihomo/subscription.url`。
+- 准备 `GeoSite.dat`、`Country.mmdb`、`geoip.metadb`，减少首次启动时 GEO 下载失败。
+- 对订阅做基本可用性检查，拒绝空节点配置。
+- 对 AnyTLS 节点自动补 `client-fingerprint: chrome`。
+- 写入本机 shell、apt、git、Docker 代理配置。
+- 启用并重启 `mihomo.service`。
+- 启动前运行 `mihomo -t`，避免坏配置写入系统代理后才暴露问题。
+
+安装命令：
 
 ```bash
 install_mihomo_proxy.sh --sub-url 'https://example.com/subscribe?...'
 ```
 
-`install_mihomo_proxy.sh` installs or updates the latest MetaCubeX mihomo
-Linux `.deb` for the current system architecture, installs the latest
-MetaCubeXD web UI, downloads a subscription config, enables `mihomo.service`,
-and writes common system proxy settings for shells, apt, git, and Docker. At
-startup it installs the basic packages it needs, including `curl`, `python3`,
-`tar`, and CA certificates.
-
-For safer command history, store the subscription URL in a file instead of
-typing it directly:
+更安全的方式是把订阅地址放到文件中：
 
 ```bash
 mkdir -p ~/.config/mihomo
@@ -110,28 +188,7 @@ chmod 600 ~/.config/mihomo/sub_url
 install_mihomo_proxy.sh --sub-url-file ~/.config/mihomo/sub_url
 ```
 
-Defaults:
-
-- HTTP proxy: `127.0.0.1:7897`
-- SOCKS proxy: `127.0.0.1:7891`
-- external controller: `0.0.0.0:9090`
-- external UI path: `/etc/mihomo/ui`
-- remote UI URL: `http://<server-ip>:9090/ui`
-
-The subscription downloader uses Clash Verge style headers by default, matching
-the common `curl -A clash-verge/v2.4.0` provider test, and tries several client
-`User-Agent` values if the first response is rejected or looks like an empty
-node config. If a provider requires extra headers, pass them explicitly:
-
-```bash
-install_mihomo_proxy.sh \
-  --sub-url-file ~/.config/mihomo/sub_url \
-  --header 'Authorization: Bearer TOKEN'
-```
-
-On a fresh machine, GEO database downloads may fail before mihomo's own proxy is
-available. In that case, borrow an existing LAN proxy for the install run. The
-same proxy is used for release downloads, the subscription, and GEO data:
+首次安装时，如果服务器直连 GitHub、订阅或 GEO 数据源不稳定，可以借用局域网内已有代理：
 
 ```bash
 install_mihomo_proxy.sh \
@@ -139,124 +196,131 @@ install_mihomo_proxy.sh \
   --download-proxy http://192.168.31.6:7897
 ```
 
-The installer also rejects empty subscription responses, adds a default
-`client-fingerprint: chrome` for AnyTLS nodes when the provider omits it,
-prepares `GeoSite.dat`, `Country.mmdb`, and `geoip.metadb` before starting the
-service, and runs `mihomo -t` so bad configs fail before system proxy settings
-point shells at a broken local port.
+默认端口：
 
-Preview the installation without changing the system:
+- HTTP 代理：`127.0.0.1:7897`
+- SOCKS 代理：`127.0.0.1:7891`
+- 外部控制器：`0.0.0.0:9090`
+- Web UI：`http://<server-ip>:9090/ui`
 
-```bash
-install_mihomo_proxy.sh --sub-url-file ~/.config/mihomo/sub_url --dry-run
-```
-
-Uninstall mihomo and restore the proxy settings written by the installer:
+卸载并恢复代理环境：
 
 ```bash
 install_mihomo_proxy.sh --uninstall
 ```
 
-Uninstall mode stops and disables `mihomo.service`, purges the apt package when
-it is installed, removes `/etc/mihomo` and `/var/log/mihomo`, removes
-`/etc/profile.d/proxy.sh`, clears proxy variables from `/etc/environment`,
-removes `/etc/apt/apt.conf.d/95proxies`, unsets system git proxy values, and
-removes the Docker systemd proxy drop-in. Use `--keep-config` if you want to
-keep `/etc/mihomo` and `/var/log/mihomo`. Open a new shell after uninstalling,
-or clear proxy variables in the current shell:
+卸载模式会：
+
+- 停止并禁用 `mihomo.service`。
+- 通过 apt purge 卸载 mihomo 包。
+- 默认删除 `/etc/mihomo` 和 `/var/log/mihomo`。
+- 删除 `/etc/profile.d/proxy.sh`。
+- 从 `/etc/environment` 清理代理变量。
+- 删除 `/etc/apt/apt.conf.d/95proxies`。
+- 清理 system git proxy。
+- 删除 Docker systemd proxy drop-in 并重载/重启 Docker。
+
+如果要保留配置和日志：
+
+```bash
+install_mihomo_proxy.sh --uninstall --keep-config
+```
+
+当前 shell 已经 source 过的变量不会被子进程反向清掉。卸载后建议打开新 shell，或手动清理：
 
 ```bash
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
 ```
 
-Useful options:
+预览安装或卸载：
 
-- `--download-proxy URL` uses an existing proxy while downloading releases, the
-  subscription, and GEO data.
-- `--user-agent VALUE` overrides the subscription fetch `User-Agent`.
-- `--skip-subscription` keeps the current `/etc/mihomo/config.yaml`.
-- `--skip-system-proxy` skips shell, apt, git, and Docker proxy settings.
-- `--skip-docker-proxy` skips only the Docker systemd proxy drop-in.
-- `--keep-config` keeps mihomo config and logs during `--uninstall`.
+```bash
+install_mihomo_proxy.sh --sub-url-file ~/.config/mihomo/sub_url --dry-run
+install_mihomo_proxy.sh --uninstall --dry-run
+```
 
-## Mihomo Config Refresher
+常用选项：
+
+- `--download-proxy URL`：下载 release、订阅和 GEO 数据时使用现有代理。
+- `--user-agent VALUE`：覆盖订阅下载的 `User-Agent`。
+- `--header 'K: V'`：给订阅请求追加请求头，可以重复传。
+- `--skip-subscription`：保留当前 `/etc/mihomo/config.yaml`。
+- `--skip-system-proxy`：不写 shell、apt、git、Docker 代理设置。
+- `--skip-docker-proxy`：只跳过 Docker systemd proxy。
+- `--keep-config`：卸载时保留配置和日志。
+
+### `refresh_mihomo_config.sh`
+
+用途：刷新已有 mihomo 的订阅配置，不重新安装 mihomo 和 MetaCubeXD。
+
+它适合 mihomo 已经安装好，只想更新 `/etc/mihomo/config.yaml` 的场景。脚本会下载订阅，运行一个临时的 Clash Verge 兼容 JavaScript 自定义脚本，再把转换后的结果写回 mihomo 配置并重启服务。
+
+默认自定义脚本：
+
+```text
+https://raw.githubusercontent.com/zhangrun-HIT/clash-subscription-customizer/main/clash-verge-script.js
+```
+
+首次刷新可以直接传订阅：
 
 ```bash
 refresh_mihomo_config.sh --sub-url 'https://example.com/subscribe?...'
 ```
 
-`refresh_mihomo_config.sh` refreshes an existing mihomo installation without
-reinstalling mihomo or MetaCubeXD. It downloads the subscription config, runs a
-temporary Clash Verge compatible JavaScript customizer from GitHub, writes the
-transformed result to `/etc/mihomo/config.yaml`, stores the subscription URL in
-`/etc/mihomo/subscription.url`, and restarts `mihomo.service`. The downloaded
-customizer lives only in the script's temporary directory and is removed when
-the run finishes.
-
-The first run can provide the subscription URL directly:
+也可以使用文件：
 
 ```bash
-refresh_mihomo_config.sh --sub-url 'https://example.com/subscribe?...'
+refresh_mihomo_config.sh --sub-url-file ~/.config/mihomo/sub_url
 ```
 
-After that, the stored URL is used automatically:
+脚本会把订阅保存到 `/etc/mihomo/subscription.url`。之后可以直接运行：
 
 ```bash
 refresh_mihomo_config.sh
 ```
 
-Defaults match the installer where they overlap:
+常用选项：
 
-- HTTP proxy: `127.0.0.1:7897`
-- SOCKS proxy: `127.0.0.1:7891`
-- external controller: `0.0.0.0:9090`
-- external UI path: `/etc/mihomo/ui`
-- stored subscription URL: `/etc/mihomo/subscription.url`
-- customizer URL:
-  `https://raw.githubusercontent.com/zhangrun-HIT/clash-subscription-customizer/main/clash-verge-script.js`
+- `--download-proxy URL`：下载订阅和自定义脚本时使用现有代理。
+- `--customizer-url URL`：换成自己的 GitHub raw JavaScript 自定义脚本。
+- `--config-file FILE`：指定要写入的 mihomo 配置文件。
+- `--no-restart`：写配置后不重启 `mihomo.service`。
+- `--skip-prerequisites`：跳过依赖安装，只检查当前环境。
+- `--dry-run`：只打印计划，不修改系统。
 
-Use another GitHub raw URL if needed:
+它同样会检查订阅响应是否像可用 mihomo 配置，拒绝空节点配置，并给缺少指纹的 AnyTLS 节点补 `client-fingerprint: chrome`。
+
+## 常用排查
+
+### 脚本没有自动更新
+
+自动更新只在仓库干净、当前分支有可快进远端时执行。如果有未提交改动，先查看：
 
 ```bash
-refresh_mihomo_config.sh --customizer-url https://raw.githubusercontent.com/OWNER/REPO/BRANCH/file.js
+git status --short
 ```
 
-Preview the refresh without changing the system:
+确认不需要保留后再手动处理。不要在有本地实验改动时强行自动 pull。
+
+### 代理配置后当前 shell 仍然没变化
+
+系统文件已经写入后，当前 shell 不会自动继承新环境。打开新终端，或按脚本提示 source 对应文件。
+
+### mihomo 安装后端口拒绝连接
+
+先看服务状态和配置校验：
 
 ```bash
-refresh_mihomo_config.sh --dry-run
+systemctl status mihomo --no-pager -l
+mihomo -t -d /etc/mihomo
 ```
 
-## Local Proxy Config
+如果是首次 GEO 下载失败，重跑安装时加 `--download-proxy`。
+
+### 卸载后当前 shell 还在走代理
+
+打开新 shell，或手动执行：
 
 ```bash
-configure_proxy.sh
-configure_proxy.sh --proxy 192.168.31.10:7897
-```
-
-`configure_proxy.sh` only configures this machine's proxy settings. It does not
-install or manage mihomo. By default it writes
-`all_proxy=socks5h://127.0.0.1:7897` into shell environment,
-`/etc/environment`, system/global git, and Docker systemd proxy settings. It
-also writes managed `http_proxy`/`https_proxy` exports to the target user's
-`~/.bashrc` for interactive terminals. It does not export HTTP(S) proxy
-variables in system environment files unless `--http-env` is passed, because
-apt reads those variables and some repositories fail through HTTP proxy. Apt
-config is left unchanged by default; pass `--apt` only when apt should also use
-the proxy. Git is configured for system/global HTTP(S) proxy, and a managed
-`Host github.com` SSH config block is added so GitHub SSH uses
-`ssh.github.com:443`. When it runs inside a Docker container on WSL, the default proxy becomes
-`host.docker.internal:7897` so the container can reach the WSL/Docker host
-proxy.
-
-For a preview:
-
-```bash
-configure_proxy.sh --dry-run
-```
-
-To remove the settings managed by the script:
-
-```bash
-configure_proxy.sh --unset
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
 ```

@@ -2,6 +2,13 @@
 # Instantiate GPU/GUI Docker images on WSL or native Ubuntu.
 set -Eeuo pipefail
 
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd -P)"
+SCRIPT_PATH="${SCRIPT_DIR}/$(basename -- "$SCRIPT_PATH")"
+# shellcheck source=lib/self_update.sh
+source "${SCRIPT_DIR}/lib/self_update.sh"
+scripts_self_update "$SCRIPT_DIR" "$SCRIPT_PATH" "$@"
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -68,10 +75,10 @@ expand_host_path() {
   local value="$1"
 
   case "$value" in
-    "~")
+    \~)
       printf '%s\n' "$HOME"
       ;;
-    "~/"*)
+    \~/*)
       printf '%s/%s\n' "$HOME" "${value#~/}"
       ;;
     *)
@@ -111,13 +118,13 @@ shorten_home_path() {
       printf '~\n'
       ;;
     "$HOME"/*)
-      printf '~/%s\n' "${value#"$HOME"/}"
+      printf '%s/%s\n' '~' "${value#"$HOME"/}"
       ;;
     "$HOME":*)
       printf '~:%s\n' "${value#"$HOME":}"
       ;;
     "$HOME"/*:*)
-      printf '~/%s\n' "${value#"$HOME"/}"
+      printf '%s/%s\n' '~' "${value#"$HOME"/}"
       ;;
     *)
       printf '%s\n' "$value"
@@ -702,7 +709,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 
   printf 'docker'
   for arg in "${display_args[@]}"; do
-    if [[ "$arg" == "~" || "$arg" == "~/"* || "$arg" == "~:"* ]]; then
+    if [[ "$arg" == \~ || "$arg" == \~/* || "$arg" == \~:* ]]; then
       printf ' %s' "$arg"
     else
       printf ' %q' "$arg"
