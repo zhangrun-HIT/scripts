@@ -15,6 +15,9 @@ MIHOMO_CONFIG_DIR="/etc/mihomo"
 MIHOMO_UI_DIR="/etc/mihomo/ui"
 MIHOMO_CONFIG_FILE="/etc/mihomo/config.yaml"
 SUB_URL_FILE="/etc/mihomo/subscription.url"
+SUBSCRIPTION_CACHE_FILE="/etc/mihomo/subscription.last-known-good.yaml"
+FINAL_CONFIG_CACHE_FILE="/etc/mihomo/config.yaml.last-known-good"
+CUSTOMIZER_CACHE_FILE="/etc/mihomo/clash-verge-script.last-known-good.js"
 CUSTOMIZER_URL="${MIHOMO_CUSTOMIZER_URL:-https://raw.githubusercontent.com/zhangrun-HIT/clash-subscription-customizer/main/clash-verge-script.js}"
 CUSTOMIZER_JS=""
 
@@ -27,12 +30,13 @@ DOWNLOAD_PROXY=""
 SUB_URL="${MIHOMO_SUB_URL:-}"
 SUB_URL_SOURCE=""
 SUB_URL_PATH=""
-FETCH_UA="${MIHOMO_SUB_UA:-clash-verge/v2.4.0}"
+FETCH_UA="${MIHOMO_SUB_UA:-clash-verge/v2.4.2}"
 CUSTOM_UA=0
 DRY_RUN=0
 NO_RESTART=0
 SKIP_PREREQUISITES=0
 TMP_DIR=""
+CONFIG_ROLLBACK_FILE=""
 
 declare -a EXTRA_HEADERS=()
 
@@ -53,7 +57,7 @@ Options:
       --config-file FILE        Mihomo config to update.
                                 Default: /etc/mihomo/config.yaml
       --user-agent VALUE        User-Agent used when fetching the subscription.
-                                Default: clash-verge/v2.4.0
+                                Default: clash-verge/v2.4.2
       --header 'K: V'           Extra header for subscription fetch. Can repeat.
       --download-proxy URL      Proxy used by curl while downloading subscription.
       --http-port PORT          HTTP proxy port written to mihomo config.
@@ -298,11 +302,51 @@ PY
 }
 
 curl_base() {
-  local -a args=(curl --fail --location --show-error --silent --compressed --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 180)
+  local -a args=(curl --fail --location --show-error --silent --compressed --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 180 --http1.1)
   if [[ -n "$DOWNLOAD_PROXY" ]]; then
     args+=(--proxy "$DOWNLOAD_PROXY")
+  else
+    args+=(--noproxy "*")
   fi
   printf '%s\0' "${args[@]}"
+}
+
+read_root_file_to() {
+  local source_file="$1"
+  local output_file="$2"
+
+  rm -f -- "$output_file"
+  if [[ -r "$source_file" ]]; then
+    cp -f -- "$source_file" "$output_file"
+  elif need_root_cmd test -r "$source_file" 2>/dev/null; then
+    need_root_cmd cat "$source_file" > "$output_file"
+  else
+    return 1
+  fi
+
+  [[ -s "$output_file" ]]
+}
+
+persist_cache_file() {
+  local source_file="$1"
+  local cache_file="$2"
+  local mode="${3:-0600}"
+
+  run_root mkdir -p "$(dirname -- "$cache_file")"
+  run_root install -m "$mode" "$source_file" "$cache_file"
+}
+
+restore_cached_file() {
+  local cache_file="$1"
+  local output_file="$2"
+  local label="$3"
+
+  if read_root_file_to "$cache_file" "$output_file"; then
+    log "Using cached ${label} from ${cache_file}"
+    return 0
+  fi
+
+  return 1
 }
 
 sanitize_subscription_config() {
@@ -386,7 +430,15 @@ fetch_subscription_config() {
   mapfile -d '' -t curl_cmd < <(curl_base)
 
   if [[ "$CUSTOM_UA" -eq 0 ]]; then
-    for candidate in "clash-verge/v2.4.0" "Clash Verge/v2.4.0" "clash-verge/v2.4.2" "Clash Verge/v2.4.2" "clash-verge/v1.7.7" "ClashforWindows/0.20.39" "ClashMetaForAndroid/2.11.13" "clash"; do
+    for candidate in \
+      "clash-verge/v2.4.2" \
+      "clash-verge/v2.4.7" \
+      "clash-verge/v2.4.0" \
+      "clash-verge/v1.7.7" \
+      "ClashforWindows/0.20.39" \
+      "ClashMetaForAndroid/2.11.13" \
+      "clash"
+    do
       [[ "$candidate" == "$FETCH_UA" ]] && continue
       user_agents+=("$candidate")
     done
@@ -397,7 +449,7 @@ fetch_subscription_config() {
     attempt=$((attempt + 1))
     attempt_file="${tmp_dir}/subscription.${attempt}.yaml"
     normalized_file="${tmp_dir}/subscription.${attempt}.normalized.yaml"
-    header_args=(-H "User-Agent: ${ua}" -H "Accept: */*" -H "Cache-Control: no-cache" -H "Pragma: no-cache")
+    header_args=(-H "User-Agent: ${ua}" -H "Accept: */*" -H "Cache-Control: no-cache" -H "Pragma: no-cache" -H "Connection: close")
     for header in "${EXTRA_HEADERS[@]}"; do
       header_args+=(-H "$header")
     done
@@ -419,6 +471,7 @@ fetch_subscription_config() {
 
     if sanitize_subscription_config "$attempt_file" "$normalized_file"; then
       cp "$normalized_file" "$output"
+      persist_cache_file "$output" "$SUBSCRIPTION_CACHE_FILE" 0600
       log "Subscription fetched successfully with User-Agent: ${ua}"
       best_file=""
       break
@@ -435,7 +488,10 @@ fetch_subscription_config() {
     warn "best subscription response was fetched with User-Agent: ${best_ua}, but it was rejected as unusable"
   fi
 
-  [[ -s "$output" ]] || die "could not fetch a usable subscription config; try --user-agent or --header"
+  if [[ ! -s "$output" ]]; then
+    restore_cached_file "$SUBSCRIPTION_CACHE_FILE" "$output" "subscription config" || \
+      die "could not fetch a usable subscription config and no cached subscription is available"
+  fi
 }
 
 fetch_customizer_js() {
@@ -446,8 +502,21 @@ fetch_customizer_js() {
   mapfile -d '' -t curl_cmd < <(curl_base)
 
   log "Fetching temporary customizer from GitHub"
-  "${curl_cmd[@]}" "$CUSTOMIZER_URL" --output "$output"
-  [[ -s "$output" ]] || die "customizer download is empty: ${CUSTOMIZER_URL}"
+  if ! "${curl_cmd[@]}" "$CUSTOMIZER_URL" --output "$output"; then
+    warn "customizer download failed: ${CUSTOMIZER_URL}"
+    restore_cached_file "$CUSTOMIZER_CACHE_FILE" "$output" "customizer script" || \
+      die "customizer download failed and no cached customizer is available"
+  elif [[ ! -s "$output" ]]; then
+    warn "customizer download is empty: ${CUSTOMIZER_URL}"
+    restore_cached_file "$CUSTOMIZER_CACHE_FILE" "$output" "customizer script" || \
+      die "customizer download is empty and no cached customizer is available"
+  elif grep -qiE '<html|<!doctype html|404: not found|access denied' "$output"; then
+    warn "customizer response looks like an error page: ${CUSTOMIZER_URL}"
+    restore_cached_file "$CUSTOMIZER_CACHE_FILE" "$output" "customizer script" || \
+      die "customizer response is not usable and no cached customizer is available"
+  else
+    persist_cache_file "$output" "$CUSTOMIZER_CACHE_FILE" 0600
+  fi
 
   if ! grep -qE 'function[[:space:]]+main|module\\.exports|exports\\.main' "$output"; then
     warn "downloaded customizer does not obviously define main(config)"
@@ -588,10 +657,30 @@ with open(sys.argv[1], encoding="utf-8") as f:
 PY
 }
 
+validate_mihomo_config() {
+  local config_file="$1"
+
+  if ! command -v mihomo >/dev/null 2>&1; then
+    warn "mihomo command was not found; skipped config test"
+    return 0
+  fi
+
+  log "Testing mihomo configuration"
+  if ! run_root env \
+    -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+    -u all_proxy -u ALL_PROXY \
+    timeout 120 mihomo -t -d "$MIHOMO_CONFIG_DIR" -f "$config_file"; then
+    die "mihomo config test failed; if GEO downloads timed out, rerun with --download-proxy"
+  fi
+}
+
 backup_config_if_needed() {
+  CONFIG_ROLLBACK_FILE=""
   if [[ -f "$MIHOMO_CONFIG_FILE" ]]; then
     local stamp=""
     stamp="$(date +%Y%m%d-%H%M%S)"
+    CONFIG_ROLLBACK_FILE="${TMP_DIR}/config.rollback.yaml"
+    read_root_file_to "$MIHOMO_CONFIG_FILE" "$CONFIG_ROLLBACK_FILE" || CONFIG_ROLLBACK_FILE=""
     run_root cp -a "$MIHOMO_CONFIG_FILE" "${MIHOMO_CONFIG_FILE}.bak-${stamp}"
     log "Backed up existing config to ${MIHOMO_CONFIG_FILE}.bak-${stamp}"
   fi
@@ -602,7 +691,8 @@ install_config() {
 
   backup_config_if_needed
   run_root mkdir -p "$MIHOMO_CONFIG_DIR"
-  run_root install -m 0644 "$source_file" "$MIHOMO_CONFIG_FILE"
+  run_root install -m 0600 "$source_file" "$MIHOMO_CONFIG_FILE"
+  persist_cache_file "$source_file" "$FINAL_CONFIG_CACHE_FILE" 0600
 }
 
 store_subscription_url() {
@@ -627,7 +717,17 @@ restart_mihomo() {
 
   if systemd_unit_exists mihomo.service; then
     log "Restarting mihomo.service"
-    run_root systemctl restart mihomo
+    if run_root systemctl restart mihomo; then
+      return 0
+    fi
+
+    if [[ -n "$CONFIG_ROLLBACK_FILE" && -s "$CONFIG_ROLLBACK_FILE" ]]; then
+      warn "mihomo restart failed; restoring previous config"
+      run_root install -m 0600 "$CONFIG_ROLLBACK_FILE" "$MIHOMO_CONFIG_FILE"
+      run_root systemctl restart mihomo || true
+    fi
+
+    die "failed to restart mihomo.service"
   else
     warn "mihomo.service was not found or systemd is unavailable; start mihomo manually"
   fi
@@ -688,6 +788,7 @@ main() {
   log "Applying local mihomo settings"
   patch_local_config "$transformed_config" "$final_config"
   validate_yaml "$final_config"
+  validate_mihomo_config "$final_config"
 
   install_config "$final_config"
   store_subscription_url

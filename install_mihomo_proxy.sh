@@ -16,6 +16,8 @@ MIHOMO_UI_DIR="/etc/mihomo/ui"
 MIHOMO_LOG_DIR="/var/log/mihomo"
 MIHOMO_CONFIG_FILE="/etc/mihomo/config.yaml"
 SUB_URL_FILE="/etc/mihomo/subscription.url"
+SUBSCRIPTION_CACHE_FILE="/etc/mihomo/subscription.last-known-good.yaml"
+FINAL_CONFIG_CACHE_FILE="/etc/mihomo/config.yaml.last-known-good"
 GEOSITE_FILE="/etc/mihomo/GeoSite.dat"
 COUNTRY_MMDB_FILE="/etc/mihomo/Country.mmdb"
 GEOIP_METADB_FILE="/etc/mihomo/geoip.metadb"
@@ -28,7 +30,7 @@ SECRET=""
 DOWNLOAD_PROXY=""
 SUB_URL="${MIHOMO_SUB_URL:-}"
 SUB_URL_PATH=""
-FETCH_UA="${MIHOMO_SUB_UA:-clash-verge/v2.4.0}"
+FETCH_UA="${MIHOMO_SUB_UA:-clash-verge/v2.4.2}"
 CUSTOM_UA=0
 SKIP_SUBSCRIPTION=0
 SKIP_SYSTEM_PROXY=0
@@ -38,6 +40,7 @@ KEEP_CONFIG=0
 DRY_RUN=0
 TMP_DIR=""
 MIHOMO_DEB_DIR=""
+CONFIG_ROLLBACK_FILE=""
 
 declare -a EXTRA_HEADERS=()
 
@@ -52,7 +55,7 @@ Options:
       --sub-url URL          Subscription URL for /etc/mihomo/config.yaml.
       --sub-url-file FILE    Read the subscription URL from FILE.
       --user-agent VALUE     User-Agent used when fetching the subscription.
-                             Default: clash-verge/v2.4.0
+                             Default: clash-verge/v2.4.2
       --header 'K: V'        Extra header for subscription fetch. Can repeat.
       --download-proxy URL   Proxy used by curl while downloading releases,
                              subscription, and GEO data.
@@ -247,9 +250,11 @@ parse_args() {
 }
 
 curl_base() {
-  local -a args=(curl --fail --location --show-error --silent --compressed --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 180)
+  local -a args=(curl --fail --location --show-error --silent --compressed --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 180 --http1.1)
   if [[ -n "$DOWNLOAD_PROXY" ]]; then
     args+=(--proxy "$DOWNLOAD_PROXY")
+  else
+    args+=(--noproxy "*")
   fi
   printf '%s\0' "${args[@]}"
 }
@@ -404,12 +409,16 @@ install_prerequisites() {
     gawk \
     gzip \
     python3 \
+    python3-yaml \
     sed \
     tar
 
   if [[ "$DRY_RUN" -eq 0 ]]; then
     require_cmd curl
     require_cmd python3
+    python3 - <<'PY'
+import yaml  # noqa: F401
+PY
     require_cmd tar
     require_cmd sed
     require_cmd awk
@@ -500,12 +509,53 @@ backup_config_if_needed() {
     return 0
   fi
 
+  CONFIG_ROLLBACK_FILE=""
   if [[ -f "$MIHOMO_CONFIG_FILE" ]]; then
     local stamp=""
     stamp="$(date +%Y%m%d-%H%M%S)"
+    CONFIG_ROLLBACK_FILE="${TMP_DIR}/config.rollback.yaml"
+    read_root_file_to "$MIHOMO_CONFIG_FILE" "$CONFIG_ROLLBACK_FILE" || CONFIG_ROLLBACK_FILE=""
     run_root cp -a "$MIHOMO_CONFIG_FILE" "${MIHOMO_CONFIG_FILE}.bak-${stamp}"
     log "Backed up existing config to ${MIHOMO_CONFIG_FILE}.bak-${stamp}"
   fi
+}
+
+read_root_file_to() {
+  local source_file="$1"
+  local output_file="$2"
+
+  rm -f -- "$output_file"
+  if [[ -r "$source_file" ]]; then
+    cp -f -- "$source_file" "$output_file"
+  elif need_root_cmd test -r "$source_file" 2>/dev/null; then
+    need_root_cmd cat "$source_file" > "$output_file"
+  else
+    return 1
+  fi
+
+  [[ -s "$output_file" ]]
+}
+
+persist_cache_file() {
+  local source_file="$1"
+  local cache_file="$2"
+  local mode="${3:-0600}"
+
+  run_root mkdir -p "$(dirname -- "$cache_file")"
+  run_root install -m "$mode" "$source_file" "$cache_file"
+}
+
+restore_cached_file() {
+  local cache_file="$1"
+  local output_file="$2"
+  local label="$3"
+
+  if read_root_file_to "$cache_file" "$output_file"; then
+    log "Using cached ${label} from ${cache_file}"
+    return 0
+  fi
+
+  return 1
 }
 
 sanitize_subscription_config() {
@@ -663,7 +713,7 @@ prepare_mihomo_geodata() {
 
 fetch_subscription_config() {
   local tmp_dir="$1"
-  local output="${tmp_dir}/config.yaml"
+  local output="${tmp_dir}/subscription.yaml"
   local normalized_file=""
   local -a curl_cmd=()
   local -a header_args=()
@@ -679,7 +729,15 @@ fetch_subscription_config() {
   mapfile -d '' -t curl_cmd < <(curl_base)
 
   if [[ "$CUSTOM_UA" -eq 0 ]]; then
-    for candidate in "clash-verge/v2.4.0" "Clash Verge/v2.4.0" "clash-verge/v2.4.2" "Clash Verge/v2.4.2" "clash-verge/v1.7.7" "ClashforWindows/0.20.39" "ClashMetaForAndroid/2.11.13" "clash"; do
+    for candidate in \
+      "clash-verge/v2.4.2" \
+      "clash-verge/v2.4.7" \
+      "clash-verge/v2.4.0" \
+      "clash-verge/v1.7.7" \
+      "ClashforWindows/0.20.39" \
+      "ClashMetaForAndroid/2.11.13" \
+      "clash"
+    do
       [[ "$candidate" == "$FETCH_UA" ]] && continue
       user_agents+=("$candidate")
     done
@@ -695,7 +753,7 @@ fetch_subscription_config() {
     attempt=$((attempt + 1))
     attempt_file="${tmp_dir}/config.${attempt}.yaml"
     normalized_file="${tmp_dir}/config.${attempt}.normalized.yaml"
-    header_args=(-H "User-Agent: ${ua}" -H "Accept: */*" -H "Cache-Control: no-cache" -H "Pragma: no-cache")
+    header_args=(-H "User-Agent: ${ua}" -H "Accept: */*" -H "Cache-Control: no-cache" -H "Pragma: no-cache" -H "Connection: close")
     for header in "${EXTRA_HEADERS[@]}"; do
       header_args+=(-H "$header")
     done
@@ -717,6 +775,7 @@ fetch_subscription_config() {
 
     if sanitize_subscription_config "$attempt_file" "$normalized_file"; then
       cp "$normalized_file" "$output"
+      persist_cache_file "$output" "$SUBSCRIPTION_CACHE_FILE" 0600
       log "Subscription fetched successfully with User-Agent: ${ua}"
       best_file=""
       break
@@ -733,60 +792,80 @@ fetch_subscription_config() {
     warn "best subscription response was fetched with User-Agent: ${best_ua}, but it was rejected as unusable"
   fi
 
-  [[ -s "$output" ]] || die "could not fetch a usable subscription config; try --user-agent or --header"
-
-  backup_config_if_needed
-  run_root mkdir -p "$MIHOMO_CONFIG_DIR"
-  run_root install -m 0644 "$output" "$MIHOMO_CONFIG_FILE"
-
-  if [[ -n "$SUB_URL" ]]; then
-    printf '%s\n' "$SUB_URL" > "${tmp_dir}/subscription.url"
-    run_root install -m 0600 "${tmp_dir}/subscription.url" "$SUB_URL_FILE"
+  if [[ ! -s "$output" ]]; then
+    restore_cached_file "$SUBSCRIPTION_CACHE_FILE" "$output" "subscription config" || \
+      die "could not fetch a usable subscription config and no cached subscription is available"
   fi
 }
 
-yaml_quote() {
-  local value="$1"
-  value="${value//\'/\'\'}"
-  printf "'%s'" "$value"
-}
+load_existing_config_for_patch() {
+  local output_file="$1"
 
-set_yaml_key() {
-  local key="$1"
-  local value="$2"
-  local tmp_file="$3"
-
-  if [[ "$DRY_RUN" -eq 1 ]]; then
-    log "Would set ${key}: ${value} in ${MIHOMO_CONFIG_FILE}"
+  if read_root_file_to "$MIHOMO_CONFIG_FILE" "$output_file"; then
+    log "Reusing existing mihomo config as the patch base"
     return 0
   fi
 
-  # shellcheck disable=SC2016
-  run_root awk -v key="$key" '
-    $0 ~ "^" key ":[[:space:]]*" { next }
-    { print }
-  ' "$MIHOMO_CONFIG_FILE" > "$tmp_file"
-  printf '%s: %s\n' "$key" "$value" >> "$tmp_file"
-  run_root install -m 0644 "$tmp_file" "$MIHOMO_CONFIG_FILE"
+  restore_cached_file "$FINAL_CONFIG_CACHE_FILE" "$output_file" "final mihomo config" || \
+    die "mihomo config not found: ${MIHOMO_CONFIG_FILE}"
 }
 
 configure_mihomo_yaml() {
-  local tmp_dir="$1"
-  local tmp_file="${tmp_dir}/config-patched.yaml"
+  local input_yaml="$1"
+  local output_yaml="$2"
 
-  [[ "$DRY_RUN" -eq 1 || -f "$MIHOMO_CONFIG_FILE" ]] || die "mihomo config not found: $MIHOMO_CONFIG_FILE"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "Would apply local mihomo settings to ${input_yaml}"
+    return 0
+  fi
 
-  set_yaml_key "port" "$HTTP_PORT" "$tmp_file"
-  set_yaml_key "socks-port" "$SOCKS_PORT" "$tmp_file"
-  set_yaml_key "allow-lan" "$ALLOW_LAN" "$tmp_file"
-  set_yaml_key "external-controller" "$(yaml_quote "$CONTROLLER_ADDR")" "$tmp_file"
-  set_yaml_key "external-ui" "$MIHOMO_UI_DIR" "$tmp_file"
-  set_yaml_key "secret" "$(yaml_quote "$SECRET")" "$tmp_file"
+  python3 - "$input_yaml" "$output_yaml" \
+    "$HTTP_PORT" "$SOCKS_PORT" "$ALLOW_LAN" "$CONTROLLER_ADDR" "$MIHOMO_UI_DIR" "$SECRET" <<'PY'
+import sys
+import yaml
+
+input_yaml, output_yaml = sys.argv[1], sys.argv[2]
+http_port, socks_port = int(sys.argv[3]), int(sys.argv[4])
+allow_lan = sys.argv[5].lower() == "true"
+controller, external_ui, secret = sys.argv[6], sys.argv[7], sys.argv[8]
+
+with open(input_yaml, encoding="utf-8") as f:
+    data = yaml.safe_load(f) or {}
+
+proxies = data.get("proxies")
+if proxies == {}:
+    raise SystemExit("subscription contains an empty top-level proxies map")
+
+if isinstance(proxies, list):
+    for proxy in proxies:
+        if not isinstance(proxy, dict):
+            continue
+        if str(proxy.get("type", "")).lower() == "anytls":
+            proxy.setdefault("client-fingerprint", "chrome")
+
+data["port"] = http_port
+data["socks-port"] = socks_port
+data["allow-lan"] = allow_lan
+data["external-controller"] = controller
+data["external-ui"] = external_ui
+data["secret"] = secret
+
+with open(output_yaml, "w", encoding="utf-8") as f:
+    yaml.safe_dump(
+        data,
+        f,
+        allow_unicode=True,
+        sort_keys=False,
+        default_flow_style=False,
+    )
+PY
 }
 
 validate_mihomo_config() {
+  local config_file="$1"
+
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    log "Would test mihomo configuration"
+    log "Would test mihomo configuration: ${config_file}"
     return 0
   fi
 
@@ -799,9 +878,27 @@ validate_mihomo_config() {
   if ! run_root env \
     -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
     -u all_proxy -u ALL_PROXY \
-    timeout 120 mihomo -t -d "$MIHOMO_CONFIG_DIR"; then
+    timeout 120 mihomo -t -d "$MIHOMO_CONFIG_DIR" -f "$config_file"; then
     die "mihomo config test failed; if GEO downloads timed out, rerun with --download-proxy"
   fi
+}
+
+install_config() {
+  local source_file="$1"
+
+  backup_config_if_needed
+  run_root mkdir -p "$MIHOMO_CONFIG_DIR"
+  run_root install -m 0600 "$source_file" "$MIHOMO_CONFIG_FILE"
+  persist_cache_file "$source_file" "$FINAL_CONFIG_CACHE_FILE" 0600
+}
+
+store_subscription_url() {
+  local tmp_file="${TMP_DIR}/subscription.url"
+
+  [[ -n "$SUB_URL" ]] || return 0
+  printf '%s\n' "$SUB_URL" > "$tmp_file"
+  run_root mkdir -p "$(dirname -- "$SUB_URL_FILE")"
+  run_root install -m 0600 "$tmp_file" "$SUB_URL_FILE"
 }
 
 write_profile_proxy() {
@@ -962,11 +1059,23 @@ remove_system_proxy() {
 }
 
 restart_mihomo() {
+  local rollback_source="${1:-}"
+
   if systemd_unit_exists mihomo.service; then
     log "Enabling and restarting mihomo.service"
     run_root systemctl enable mihomo
-    run_root systemctl restart mihomo
-    run_root systemctl is-enabled mihomo
+    if run_root systemctl restart mihomo; then
+      run_root systemctl is-enabled mihomo
+      return 0
+    fi
+
+    if [[ -n "$rollback_source" && -s "$rollback_source" ]]; then
+      warn "mihomo restart failed; restoring previous config"
+      run_root install -m 0600 "$rollback_source" "$MIHOMO_CONFIG_FILE"
+      run_root systemctl restart mihomo || true
+    fi
+
+    die "failed to restart mihomo.service"
   else
     warn "mihomo.service was not found or systemd is unavailable; start mihomo manually"
   fi
@@ -1063,19 +1172,29 @@ main() {
   install_mihomo "$TMP_DIR"
   install_ui "$TMP_DIR"
 
+  local base_config="${TMP_DIR}/config.base.yaml"
+  local candidate_config="${TMP_DIR}/config.final.yaml"
+
   if [[ "$SKIP_SUBSCRIPTION" -eq 0 ]]; then
     fetch_subscription_config "$TMP_DIR"
+    base_config="${TMP_DIR}/subscription.yaml"
+  elif [[ "$DRY_RUN" -eq 1 ]]; then
+    log "Would reuse the existing mihomo config as the patch base"
+  else
+    load_existing_config_for_patch "$base_config"
   fi
 
-  configure_mihomo_yaml "$TMP_DIR"
+  configure_mihomo_yaml "$base_config" "$candidate_config"
   prepare_mihomo_geodata
-  validate_mihomo_config
+  validate_mihomo_config "$candidate_config"
+  install_config "$candidate_config"
+  store_subscription_url
 
   if [[ "$SKIP_SYSTEM_PROXY" -eq 0 ]]; then
     configure_system_proxy "$TMP_DIR"
   fi
 
-  restart_mihomo
+  restart_mihomo "$CONFIG_ROLLBACK_FILE"
   print_summary
 }
 

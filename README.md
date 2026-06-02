@@ -2,6 +2,8 @@
 
 这个仓库放的是日常在 WSL、Ubuntu、Docker、代理和 mihomo 环境里反复会用到的小脚本。默认推荐先运行 `install_path.sh`，把仓库加入 `PATH`，之后就可以在任意目录直接调用这些命令。
 
+默认情况下，仓库根目录下的脚本按 Ubuntu / WSL Linux 环境设计；如果要从 WSL 直接操作 Windows 上的 Clash Verge Rev，请看后面的 `windows/` 目录说明。
+
 ## 安装到 PATH
 
 在仓库目录下运行：
@@ -233,6 +235,10 @@ select_clash_node.py \
 - 准备 `GeoSite.dat`、`Country.mmdb`、`geoip.metadb`，减少首次启动时 GEO 下载失败。
 - 对订阅做基本可用性检查，拒绝空节点配置。
 - 对 AnyTLS 节点自动补 `client-fingerprint: chrome`。
+- 默认用官方客户端风格的 `User-Agent: clash-verge/v2.4.2` 拉取订阅。
+- 订阅拉取失败时会回退到 `/etc/mihomo/subscription.last-known-good.yaml`。
+- 只有临时配置通过 `mihomo -t -f ...` 校验后，才会替换正式配置。
+- 成功写入后会刷新 `/etc/mihomo/config.yaml.last-known-good`，重启失败时会回滚到上一版配置。
 - 写入本机 shell、apt、git、Docker 代理配置。
 - 启用并重启 `mihomo.service`。
 - 启动前运行 `mihomo -t`，避免坏配置写入系统代理后才暴露问题。
@@ -320,6 +326,14 @@ install_mihomo_proxy.sh --uninstall --dry-run
 
 它适合 mihomo 已经安装好，只想更新 `/etc/mihomo/config.yaml` 的场景。脚本会下载订阅，运行一个临时的 Clash Verge 兼容 JavaScript 自定义脚本，再把转换后的结果写回 mihomo 配置并重启服务。
 
+订阅刷新链路现在默认带这些保护：
+
+- 默认 `User-Agent` 是 `clash-verge/v2.4.2`。
+- 如果实时订阅拉取失败，会回退到 `/etc/mihomo/subscription.last-known-good.yaml`。
+- 如果 GitHub 上的 customizer 拉取失败，会回退到 `/etc/mihomo/clash-verge-script.last-known-good.js`。
+- 只有最终配置通过 YAML 解析和 `mihomo -t -f ...` 校验后，才会覆盖正式配置。
+- 成功写入后会刷新 `/etc/mihomo/config.yaml.last-known-good`，重启失败时会自动回滚。
+
 默认自定义脚本：
 
 ```text
@@ -354,6 +368,28 @@ refresh_mihomo_config.sh
 - `--dry-run`：只打印计划，不修改系统。
 
 它同样会检查订阅响应是否像可用 mihomo 配置，拒绝空节点配置，并给缺少指纹的 AnyTLS 节点补 `client-fingerprint: chrome`。
+
+补充说明：
+
+- 这里的 UA 必须保持小写 `clash-verge/...` 形式。
+- `Clash Verge/v2.4.2` 这种带空格和大写的写法会被部分订阅服务返回 `403 Forbidden`。
+
+### `windows/`
+
+用途：把“运行在 WSL，但目标是 Windows 上 Clash Verge Rev”的脚本单独放在一个目录里，避免和 Ubuntu 侧系统脚本混用。
+
+当前包含：
+
+- `windows/update_clash_verge_profile_wsl.sh`：在 WSL 中模拟官方 `Clash Verge v2.4.2` 的订阅更新请求，直接更新 Windows profile YAML，并带上次成功缓存回退。
+- `windows/select_clash_node.py`：顶层 `select_clash_node.py` 的同目录入口，便于在 `windows/` 目录直接调用。
+
+示例：
+
+```bash
+windows/update_clash_verge_profile_wsl.sh \
+  --sub-url-file ~/.config/mihomo/sub_url \
+  --profile-id RmkFk6tnuFxa
+```
 
 ## 常用排查
 
