@@ -391,6 +391,12 @@ windows/update_clash_verge_profile_wsl.sh \
   --profile-id RmkFk6tnuFxa
 ```
 
+首次成功运行后，这个脚本会记住 `--sub-url` 和 `--profile-id`；之后如果目标不变，可以直接再次执行：
+
+```bash
+windows/update_clash_verge_profile_wsl.sh
+```
+
 ## 常用排查
 
 ### 脚本没有自动更新

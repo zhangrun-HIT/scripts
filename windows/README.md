@@ -11,7 +11,23 @@
 - 默认 `User-Agent` 是 `clash-verge/v2.4.2`
 - 会优先直连拉取订阅，不继承当前 shell 的代理环境
 - 拉取失败时会回退到同目录下的 `*.last-known-good.yaml` 缓存
+- 第一次成功运行后，会把 `--sub-url` 和 `--profile-id` 记到 `~/.local/state/update_clash_verge_profile_wsl/last_success.json`
+- 后续再次运行时，如果不再传这两个参数，会默认复用上一次成功运行的值
 - 只做校验和覆盖，不会改写 YAML 内容，尽量贴近官方客户端行为
+
+第一次运行建议这样执行：
+
+```bash
+windows/update_clash_verge_profile_wsl.sh \
+  --sub-url 'http://43.135.28.238/link/Ch1L3KTh50xosaKt?clash=2' \
+  --profile-id RmkFk6tnuFxa
+```
+
+之后如果还是更新同一个订阅和同一个 profile，可以直接：
+
+```bash
+windows/update_clash_verge_profile_wsl.sh
+```
 
 示例：
 
@@ -27,6 +43,12 @@ windows/update_clash_verge_profile_wsl.sh \
 windows/update_clash_verge_profile_wsl.sh \
   --sub-url 'http://43.135.28.238/link/Ch1L3KTh50xosaKt?clash=2' \
   --profile-file '/mnt/c/Users/zhangrun/AppData/Roaming/io.github.clash-verge-rev.clash-verge-rev/profiles/RmkFk6tnuFxa.yaml'
+```
+
+如果你想清掉这份“上一次成功运行”的默认参数，删掉下面这个文件即可：
+
+```bash
+rm -f ~/.local/state/update_clash_verge_profile_wsl/last_success.json
 ```
 
 ## `select_clash_node.py`

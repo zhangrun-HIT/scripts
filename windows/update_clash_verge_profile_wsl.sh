@@ -12,6 +12,7 @@ scripts_self_update "$REPO_DIR" "$SCRIPT_PATH" "$@"
 
 SCRIPT_NAME="$(basename "$0")"
 APP_PACKAGE_DIR="io.github.clash-verge-rev.clash-verge-rev"
+DEFAULT_STATE_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/update_clash_verge_profile_wsl/last_success.json"
 
 SUB_URL="${MIHOMO_SUB_URL:-}"
 SUB_URL_PATH=""
@@ -23,8 +24,11 @@ PROFILE_ID="${MIHOMO_CLASH_VERGE_PROFILE_ID:-}"
 PROFILE_FILE="${MIHOMO_CLASH_VERGE_PROFILE_FILE:-}"
 OUTPUT_FILE=""
 CACHE_FILE=""
+STATE_FILE="${MIHOMO_CLASH_VERGE_STATE_FILE:-$DEFAULT_STATE_FILE}"
 DRY_RUN=0
 CUSTOM_UA=0
+USED_STORED_SUB_URL=0
+USED_STORED_PROFILE_ID=0
 
 declare -a EXTRA_HEADERS=()
 
@@ -35,6 +39,7 @@ Usage:
   update_clash_verge_profile_wsl.sh --sub-url-file FILE --profile-id ID [options]
   update_clash_verge_profile_wsl.sh --sub-url URL --profile-file FILE [options]
   update_clash_verge_profile_wsl.sh --sub-url URL --output FILE [options]
+  update_clash_verge_profile_wsl.sh
 
 Options:
       --sub-url URL          Subscription URL to fetch.
@@ -49,6 +54,8 @@ Options:
       --profile-file FILE    Exact Windows profile YAML path to overwrite.
       --output FILE          Write the fetched YAML to FILE.
       --cache-file FILE      Cache file used when live fetch fails.
+      --state-file FILE      Last successful run state file.
+                             Default: ~/.local/state/update_clash_verge_profile_wsl/last_success.json
       --dry-run              Print planned actions without changing files.
   -h, --help                 Show this help.
 
@@ -60,6 +67,8 @@ Examples:
   update_clash_verge_profile_wsl.sh \
     --sub-url-file ~/.config/mihomo/sub_url \
     --profile-file '/mnt/c/Users/zhangrun/AppData/Roaming/io.github.clash-verge-rev.clash-verge-rev/profiles/RmkFk6tnuFxa.yaml'
+
+  update_clash_verge_profile_wsl.sh
 EOF
 }
 
@@ -89,6 +98,99 @@ run() {
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+derive_profile_id_from_path() {
+  local path="$1"
+
+  [[ "$path" =~ /profiles/([^/]+)\.ya?ml$ ]] || return 1
+  printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+load_last_run_state() {
+  local -a state_fields=()
+  local key=""
+  local value=""
+
+  [[ -s "$STATE_FILE" ]] || return 0
+
+  if ! mapfile -d '' -t state_fields < <(
+    python3 - "$STATE_FILE" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as f:
+    data = json.load(f)
+
+for key in ("sub_url", "profile_id", "windows_user", "app_data_dir"):
+    value = data.get(key, "")
+    if value is None:
+        value = ""
+    sys.stdout.buffer.write(key.encode("utf-8"))
+    sys.stdout.buffer.write(b"\0")
+    sys.stdout.buffer.write(str(value).encode("utf-8"))
+    sys.stdout.buffer.write(b"\0")
+PY
+  ); then
+    warn "failed to parse stored state file: ${STATE_FILE}"
+    return 0
+  fi
+
+  local index=0
+  while (( index + 1 < ${#state_fields[@]} )); do
+    key="${state_fields[index]}"
+    value="${state_fields[index + 1]}"
+    case "$key" in
+      sub_url)
+        if [[ -z "$SUB_URL" && -n "$value" ]]; then
+          SUB_URL="$value"
+          USED_STORED_SUB_URL=1
+        fi
+        ;;
+      profile_id)
+        if [[ -z "$PROFILE_ID" && -n "$value" ]]; then
+          PROFILE_ID="$value"
+          USED_STORED_PROFILE_ID=1
+        fi
+        ;;
+      windows_user)
+        [[ -n "$WINDOWS_USER" ]] || WINDOWS_USER="$value"
+        ;;
+      app_data_dir)
+        [[ -n "$APP_DATA_DIR" ]] || APP_DATA_DIR="$value"
+        ;;
+    esac
+    index=$((index + 2))
+  done
+}
+
+persist_last_run_state() {
+  python3 - "$STATE_FILE" "$SUB_URL" "$PROFILE_ID" "$WINDOWS_USER" "$APP_DATA_DIR" <<'PY'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+path, sub_url, profile_id, windows_user, app_data_dir = sys.argv[1:6]
+directory = os.path.dirname(path)
+if directory:
+    os.makedirs(directory, exist_ok=True)
+
+data = {
+    "sub_url": sub_url,
+    "profile_id": profile_id,
+    "windows_user": windows_user,
+    "app_data_dir": app_data_dir,
+    "saved_at": datetime.now(timezone.utc).isoformat(),
+}
+
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+    f.write("\n")
+PY
+
+  log "Saved last successful parameters to ${STATE_FILE}"
 }
 
 parse_args() {
@@ -150,6 +252,11 @@ parse_args() {
         CACHE_FILE="$2"
         shift 2
         ;;
+      --state-file)
+        [[ $# -ge 2 ]] || die "--state-file requires a value"
+        STATE_FILE="$2"
+        shift 2
+        ;;
       --dry-run)
         DRY_RUN=1
         shift
@@ -169,7 +276,18 @@ parse_args() {
     SUB_URL="$(sed -n '/^[[:space:]]*#/d; /^[[:space:]]*$/d; s/^[[:space:]]*//; s/[[:space:]]*$//; p; q' "$SUB_URL_PATH")"
   fi
 
-  [[ -n "$SUB_URL" ]] || die "provide --sub-url URL, --sub-url-file FILE, or MIHOMO_SUB_URL"
+  if [[ -n "$PROFILE_FILE" && -z "$PROFILE_ID" ]]; then
+    PROFILE_ID="$(derive_profile_id_from_path "$PROFILE_FILE" || true)"
+  fi
+
+  load_last_run_state
+
+  [[ -n "$SUB_URL" ]] || die "first run requires --sub-url URL or --sub-url-file FILE"
+  [[ -n "$PROFILE_ID" ]] || die "first run requires --profile-id ID"
+
+  if [[ "$USED_STORED_SUB_URL" -eq 1 || "$USED_STORED_PROFILE_ID" -eq 1 ]]; then
+    log "Using stored parameters from ${STATE_FILE}"
+  fi
 
   if [[ -z "$APP_DATA_DIR" ]]; then
     APP_DATA_DIR="/mnt/c/Users/${WINDOWS_USER}/AppData/Roaming/${APP_PACKAGE_DIR}"
@@ -341,9 +459,11 @@ print_summary() {
 
 Done.
   Subscription URL: ${SUB_URL}
+  Profile ID:       ${PROFILE_ID}
   User-Agent:       ${FETCH_UA}
   Output file:      ${OUTPUT_FILE}
   Cache file:       ${CACHE_FILE}
+  State file:       ${STATE_FILE}
 EOF
 }
 
@@ -360,10 +480,12 @@ PY
     cat <<EOF
 [${SCRIPT_NAME}] Dry run plan:
   Subscription URL: ${SUB_URL}
+  Profile ID:       ${PROFILE_ID}
   User-Agent:       ${FETCH_UA}
   App data dir:     ${APP_DATA_DIR}
   Output file:      ${OUTPUT_FILE}
   Cache file:       ${CACHE_FILE}
+  State file:       ${STATE_FILE}
 EOF
     return 0
   fi
@@ -374,6 +496,7 @@ EOF
   local fetched_profile="${TMP_DIR}/profile.yaml"
   fetch_subscription_config "$fetched_profile"
   install_profile "$fetched_profile"
+  persist_last_run_state
   print_summary
 }
 
